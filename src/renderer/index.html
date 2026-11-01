@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self'; script-src 'self'">
+  <title>Cull Pix</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div id="app-shell" class="app-shell">
+    <aside id="sidebar" class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div><div class="brand-name">cull pix<span class="brand-dot">.</span></div><div class="brand-caption">PHOTO REVIEW STUDIO</div></div>
+      </div>
+
+      <div class="sidebar-section folder-section">
+        <div class="section-label">WORKSPACE</div>
+        <button id="open-folder" class="folder-button" type="button"><span class="folder-icon" aria-hidden="true">▣</span><span>Open a folder</span><span class="button-arrow" aria-hidden="true">↗</span></button>
+        <div id="folder-name" class="folder-name">No folder selected</div>
+        <button id="keep" class="action-button keep-button" type="button" disabled><span class="action-symbol">✓</span><span class="action-label">Keep photo</span><kbd>L</kbd></button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-label">VIEW</div>
+        <button id="toggle-non-keepers" class="view-toggle" type="button" aria-pressed="false">
+          <span class="toggle-copy"><span class="toggle-title">Show non-keepers</span><span class="toggle-hint">Press H to toggle</span></span>
+          <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+        </button>
+        <button id="toggle-loop" class="view-toggle" type="button" aria-pressed="false">
+          <span class="toggle-copy"><span class="toggle-title">Loop navigation</span><span class="toggle-hint">Wrap between first and last photo</span></span>
+          <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+        </button>
+      </div>
+
+      <div class="sidebar-section progress-section">
+        <div class="section-label">KEEPER SELECTION</div>
+        <div class="progress-heading"><span id="reviewed-count">0 of 0 kept</span><strong id="reviewed-percent">0%</strong></div>
+        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+        <div class="stat-list">
+          <div class="stat-row"><span class="stat-name"><span class="stat-dot keeper"></span>Keepers</span><strong id="keeper-count">0</strong></div>
+          <div class="stat-row"><span class="stat-name"><span class="stat-dot unreviewed"></span>Unmarked</span><strong id="unmarked-count">0</strong></div>
+        </div>
+        <button id="copy-keepers" class="copy-button" type="button" disabled><span class="copy-glyph" aria-hidden="true">⧉</span><span>Copy keepers</span><span id="copy-count" class="copy-count">0</span></button>
+      </div>
+
+      <div class="shortcuts-card">
+        <div class="section-label">QUICK KEYS</div>
+        <div class="shortcut-row"><span>Previous / next</span><span><kbd>↑</kbd><kbd>↓</kbd><kbd>K</kbd><kbd>J</kbd></span></div>
+        <div class="shortcut-row"><span>Keep / unmark</span><kbd>L</kbd></div>
+        <div class="shortcut-row"><span>Hide / show</span><kbd>H</kbd></div>
+        <div class="shortcut-row"><span>Sidebar / strip</span><span><kbd>B</kbd><kbd>F</kbd></span></div>
+        <div class="shortcut-row"><span>Copy keepers</span><kbd>C</kbd></div>
+        <div class="shortcut-row"><span>Zoom</span><span>Pinch / Ctrl+wheel</span></div>
+        <div class="shortcut-row"><span>Reset zoom</span><kbd>Z</kbd></div>
+      </div>
+      <div class="sidebar-footer">Your originals stay where they are.</div>
+    </aside>
+    <button id="toggle-sidebar" class="sidebar-edge-toggle" type="button" title="Hide sidebar (B)" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
+    </button>
+
+    <main class="workspace">
+      <div class="content">
+        <div class="viewer-column">
+        <div id="stage" class="stage">
+          <div id="position" class="position">— / —</div>
+          <div id="empty-state" class="empty-state">
+            <div class="empty-symbol" aria-hidden="true"><div class="empty-frame"><div class="empty-sun"></div><div class="empty-mountain"></div></div></div>
+            <h2>Make the good shots count.</h2>
+            <p>Choose a folder to browse your photos and pick the ones worth keeping.</p>
+            <button id="empty-open-folder" class="empty-button" type="button">Choose a folder <span aria-hidden="true">↗</span></button>
+          </div>
+          <img id="main-image" class="main-image" alt="" draggable="false" hidden>
+          <div id="preview-error" class="preview-error" hidden>Preview unavailable for this image on this computer.</div>
+          <button id="previous" class="stage-nav previous" type="button" aria-label="Previous photo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg></button>
+          <button id="next" class="stage-nav next" type="button" aria-label="Next photo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+          <button id="zoom-map" class="zoom-map" type="button" aria-label="Photo overview: click or drag to pan; arrow keys move the view" title="Click or drag to move around the photo" hidden>
+            <canvas id="zoom-map-image" aria-hidden="true"></canvas>
+            <span id="zoom-map-viewport" class="zoom-map-viewport" aria-hidden="true"></span>
+          </button>
+          <button id="reset-zoom" class="reset-zoom" type="button" title="Reset zoom (Z)" aria-label="Reset zoom to fit (Z)" hidden>Fit</button>
+          <div id="stage-badge" class="stage-badge" hidden></div>
+        </div>
+        </div>
+
+        <div class="filmstrip-edge">
+          <button id="toggle-filmstrip" class="filmstrip-edge-toggle" type="button" title="Hide photo strip (F)" aria-label="Hide photo strip" aria-controls="filmstrip-panel" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
+        </div>
+        <div id="filmstrip-panel" class="filmstrip-panel">
+          <div class="filmstrip-heading"><div><span class="section-label">PHOTO STRIP</span><span id="visible-count" class="visible-count">0 photos</span></div><span class="filmstrip-hint">Click any photo to jump</span></div>
+          <div id="filmstrip" class="filmstrip" aria-label="Photos in folder"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="unmark-dialog" class="confirmation-dialog" aria-labelledby="unmark-title" aria-describedby="unmark-description">
+    <div class="confirmation-content">
+      <h2 id="unmark-title">Unmark this keeper?</h2>
+      <p id="unmark-description">This photo will no longer be a keeper. If non-keepers are hidden, it will disappear from your view.</p>
+      <p class="confirmation-hint">Press Enter to confirm. Any other key cancels.</p>
+      <div class="confirmation-actions">
+        <button id="cancel-unmark" class="action-button clear-button" type="button">Cancel</button>
+        <button id="confirm-unmark" class="action-button keep-button" type="button">Unmark keeper <kbd>Enter</kbd></button>
+      </div>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

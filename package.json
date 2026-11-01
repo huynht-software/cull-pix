@@ -1,0 +1,21 @@
+{
+  "name": "cull-pix",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A fast local photo culling app for macOS and Windows",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "package:mac": "node scripts/package.js darwin",
+    "package:win": "node scripts/package.js win32",
+    "test:renderer": "electron scripts/verify-renderer.cjs",
+    "test:file-opening": "electron scripts/verify-file-opening.cjs",
+    "test:mac-opening": "node scripts/verify-mac-opening.cjs",
+    "test:zoom": "electron scripts/verify-zoom.cjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "44.5.1"
+  }
+}
