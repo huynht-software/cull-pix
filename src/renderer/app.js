@@ -1,10 +1,19 @@
 const api = window.cullPix;
+const { layouts, clamp, validCrop, imageGeometry, defaultBorder, validBorder, borderFrame, validRotation, rotatedDimensions } = window.CullCrop;
+const { modes: sortModes, comparePhotos } = window.CullPhotoOrder;
 const elements = Object.fromEntries([
   'app-shell', 'sidebar', 'toggle-sidebar', 'toggle-filmstrip', 'filmstrip-panel',
+  'sidebar-resizer', 'filmstrip-resizer', 'filmstrip-columns',
+  'photo-sort', 'show-filenames', 'sort-status',
   'open-folder', 'empty-open-folder', 'folder-name', 'toggle-non-keepers', 'toggle-loop',
   'reviewed-count', 'reviewed-percent', 'progress-fill', 'keeper-count',
   'unmarked-count', 'copy-keepers', 'copy-count',
-  'position', 'stage', 'empty-state', 'main-image',
+  'position', 'stage', 'empty-state', 'main-image', 'photo-viewport',
+  'crop-layout', 'crop-hint', 'crop-label', 'reset-crop', 'photo-mat',
+  'border-enabled', 'border-options', 'border-width', 'border-width-label', 'border-color', 'export-image',
+  'zoom-slider', 'zoom-percent', 'zoom-in', 'zoom-out',
+  'rotate-left', 'rotate-right', 'reset-rotation', 'rotation-angle',
+  'check-updates', 'install-update', 'update-status',
   'preview-error', 'reset-zoom', 'zoom-map', 'zoom-map-image', 'zoom-map-viewport', 'previous', 'next', 'stage-badge',
   'keep', 'visible-count', 'filmstrip', 'toast',
   'unmark-dialog', 'cancel-unmark', 'confirm-unmark'
@@ -14,10 +23,19 @@ const state = {
   folder: null,
   images: [],
   selectedName: null,
+  layout: 'original',
+  border: defaultBorder(),
+  exporting: false,
+  rotating: false,
   showNonKeepers: true,
   loopNavigation: false,
   showSidebar: true,
   showFilmstrip: true,
+  sidebarWidth: innerWidth <= 1050 ? 220 : 258,
+  filmstripWidth: innerWidth <= 1050 ? 148 : 172,
+  filmstripColumns: 1,
+  photoSort: 'name-asc',
+  showFilenames: false,
   busy: false
 };
 const previewCache = new Map();
@@ -25,49 +43,343 @@ let toastTimer;
 let previewToken = 0;
 let thumbnailObserver;
 let filmstripKey = null;
-let lastScrolledName = null;
+let filmstripAppearanceKey = null;
+let filmstripSelection = null;
+const filmstripButtons = new Map();
+const dirtyThumbnails = new Set();
 let pendingUnmark = null;
 let mapPreviewKey = null;
+let mapThumbnailKey = null;
+let mapThumbnail = null;
+let mapThumbnailFailed = false;
+let renderedLayout = null;
+let renderedRotation = null;
 let mapPointer = null;
+let mainImageReady = false;
 const zoom = { scale: 1, x: 0, y: 0, imageKey: null, drag: null };
+let cropX = 0;
+let cropY = 0;
+let spaceHeld = false;
+let cropSaveTimer;
+let pendingCropSave;
+let folderRevision = 0;
+let datesLoaded = false;
+let captureDateRequest;
+function showUpdateState(update) {
+  elements['update-status'].textContent = `v${update.version} · ${update.message}`;
+  elements['check-updates'].disabled = ['checking', 'downloading', 'unavailable'].includes(update.status);
+  elements['install-update'].hidden = !update.canInstall;
+}
+api.onUpdateState(showUpdateState);
+api.getUpdateState().then(showUpdateState).catch(() => {});
+elements['check-updates'].addEventListener('click', () => api.checkUpdates().then(showUpdateState).catch(() => {}));
+elements['install-update'].addEventListener('click', async () => { await flushCropSave(); if (!state.exporting) await api.installUpdate(); });
+window.addEventListener('online', () => api.checkUpdates().catch(() => {}));
+
+const sidebarSections = [...document.querySelectorAll('#sidebar details[data-section]')];
+try {
+  const saved = JSON.parse(localStorage.getItem('sidebar-sections') || '{}');
+  for (const section of sidebarSections) {
+    if (typeof saved[section.dataset.section] === 'boolean') section.open = saved[section.dataset.section];
+  }
+} catch { /* Default section states work without local storage. */ }
+for (const section of sidebarSections) section.addEventListener('toggle', () => {
+  try {
+    localStorage.setItem('sidebar-sections', JSON.stringify(Object.fromEntries(sidebarSections.map(item => [item.dataset.section, item.open]))));
+  } catch { /* Collapsing still works without storage. */ }
+});
+
+try {
+  const preferences = JSON.parse(localStorage.getItem('panel-layout') || '{}');
+  for (const key of ['sidebarWidth', 'filmstripWidth']) {
+    if (Number.isFinite(preferences[key])) state[key] = preferences[key];
+  }
+  if ([1, 2, 3, 4].includes(preferences.filmstripColumns)) state.filmstripColumns = preferences.filmstripColumns;
+  if (sortModes.includes(preferences.photoSort)) state.photoSort = preferences.photoSort;
+  state.showFilenames = preferences.showFilenames === true;
+} catch { /* The default layout also works when preferences cannot be read. */ }
+
+function savePanelLayout() {
+  try {
+    localStorage.setItem('panel-layout', JSON.stringify({ sidebarWidth: state.sidebarWidth,
+      filmstripWidth: state.filmstripWidth, filmstripColumns: state.filmstripColumns,
+      photoSort: state.photoSort, showFilenames: state.showFilenames }));
+  } catch { /* Resizing remains available if local storage is unavailable. */ }
+}
+
+function sizePanels() {
+  const total = elements['app-shell'].clientWidth;
+  const left = state.showSidebar ? state.sidebarWidth : 0;
+  const rightMax = Math.max(140, Math.min(900, total - left - 300));
+  state.filmstripWidth = clamp(state.filmstripWidth, 140, rightMax);
+  const right = state.showFilmstrip ? state.filmstripWidth : 0;
+  const leftMax = Math.max(200, Math.min(440, total - right - 300));
+  state.sidebarWidth = clamp(state.sidebarWidth, 200, leftMax);
+  elements['app-shell'].style.setProperty('--sidebar-width', `${state.sidebarWidth}px`);
+  elements['app-shell'].style.setProperty('--filmstrip-width', `${state.filmstripWidth}px`);
+  elements.filmstrip.style.setProperty('--filmstrip-columns', state.filmstripColumns);
+  elements['filmstrip-columns'].value = String(state.filmstripColumns);
+  for (const [id, min, max, value] of [
+    ['sidebar-resizer', 200, leftMax, state.sidebarWidth],
+    ['filmstrip-resizer', 140, rightMax, state.filmstripWidth]
+  ]) {
+    const handle = elements[id];
+    handle.setAttribute('aria-valuemin', String(min));
+    handle.setAttribute('aria-valuemax', String(max));
+    handle.setAttribute('aria-valuenow', String(Math.round(value)));
+  }
+}
+
+for (const [id, key, direction] of [
+  ['sidebar-resizer', 'sidebarWidth', 1], ['filmstrip-resizer', 'filmstripWidth', -1]
+]) {
+  const handle = elements[id];
+  let drag;
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    drag = { id: event.pointerId, x: event.clientX, width: state[key] };
+    handle.setPointerCapture(event.pointerId);
+    document.body.classList.add('resizing');
+  });
+  handle.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.id) return;
+    state[key] = drag.width + (event.clientX - drag.x) * direction;
+    sizePanels();
+  });
+  const finish = () => {
+    const previous = drag;
+    drag = null;
+    if (!previous) return;
+    if (handle.hasPointerCapture(previous.id)) handle.releasePointerCapture(previous.id);
+    document.body.classList.remove('resizing');
+    savePanelLayout();
+  };
+  for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) handle.addEventListener(event, finish);
+  window.addEventListener('blur', finish);
+  handle.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Home') state[key] = Number(handle.getAttribute('aria-valuemin'));
+    else if (event.key === 'End') state[key] = Number(handle.getAttribute('aria-valuemax'));
+    else state[key] += (event.key === 'ArrowRight' ? 16 : -16) * direction;
+    sizePanels();
+    savePanelLayout();
+  });
+}
+
+function updateLoadedThumbnailCrops() {
+  if (!state.showFilmstrip) return;
+  const byName = new Map(state.images.map(image => [image.name, image]));
+  for (const button of elements.filmstrip.children) {
+    const image = byName.get(button.dataset.name);
+    if (image) updateThumbnailCrop(button, image);
+  }
+}
+new ResizeObserver(updateLoadedThumbnailCrops).observe(elements.filmstrip);
+window.addEventListener('resize', sizePanels);
+elements['filmstrip-columns'].addEventListener('change', () => {
+  state.filmstripColumns = Number(elements['filmstrip-columns'].value);
+  sizePanels();
+  savePanelLayout();
+  requestAnimationFrame(updateLoadedThumbnailCrops);
+  elements.stage.focus({ preventScroll: true });
+});
+
+async function applyPhotoSort() {
+  const folder = state.folder;
+  const revision = folderRevision;
+  elements['photo-sort'].value = state.photoSort;
+  state.images.sort((a, b) => comparePhotos(a, b, state.photoSort));
+  render();
+  if (!folder || !state.photoSort.startsWith('taken-') || datesLoaded) {
+    elements['sort-status'].hidden = !state.photoSort.startsWith('taken-') || !folder;
+    elements['sort-status'].textContent = 'Photos without an EXIF capture date appear last, by name.';
+    return;
+  }
+  elements['sort-status'].hidden = false;
+  elements['sort-status'].textContent = 'Reading EXIF capture dates…';
+  try {
+    captureDateRequest ||= api.getCaptureDates(folder);
+    const dates = await captureDateRequest;
+    if (folderRevision !== revision) return;
+    for (const image of state.images) image.dateTaken = dates[image.name] ?? null;
+    datesLoaded = true;
+    state.images.sort((a, b) => comparePhotos(a, b, state.photoSort));
+    elements['sort-status'].textContent = 'Photos without an EXIF capture date appear last, by name.';
+    elements['sort-status'].hidden = !state.photoSort.startsWith('taken-');
+    render();
+  } catch (error) {
+    if (folderRevision !== revision) return;
+    captureDateRequest = null;
+    elements['sort-status'].textContent = 'Capture dates could not be read. Photos remain sorted by name.';
+    showToast(error.message || 'Could not read capture dates', true);
+  }
+}
+elements['photo-sort'].addEventListener('change', () => {
+  state.photoSort = elements['photo-sort'].value;
+  savePanelLayout();
+  applyPhotoSort();
+});
+elements['show-filenames'].addEventListener('change', () => {
+  state.showFilenames = elements['show-filenames'].checked;
+  elements.filmstrip.classList.toggle('show-filenames', state.showFilenames);
+  savePanelLayout();
+});
+
+for (const [value, layout] of Object.entries(layouts)) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = layout.label;
+  elements['crop-layout'].append(option);
+}
+
+function isCropping() { return state.layout !== 'original'; }
+
+function viewGeometry() {
+  const image = elements['main-image'];
+  const rotation = selectedImage()?.rotation || 0;
+  const dimensions = rotatedDimensions(image.naturalWidth, image.naturalHeight, rotation);
+  const frame = borderFrame(elements.stage.clientWidth, elements.stage.clientHeight,
+    dimensions.width, dimensions.height, state.layout, state.border);
+  return { ...frame, ...imageGeometry(frame.width, frame.height, dimensions.width, dimensions.height, state.layout, zoom.scale), rotation };
+}
+
+function setZoomPosition(x, y) {
+  zoom.x = x;
+  zoom.y = y;
+  if (isCropping()) {
+    const { photoWidth, photoHeight } = viewGeometry();
+    cropX = photoWidth ? x / photoWidth : 0;
+    cropY = photoHeight ? y / photoHeight : 0;
+  }
+  updateZoom();
+}
+
+function flushCropSave() {
+  clearTimeout(cropSaveTimer);
+  const pending = pendingCropSave;
+  pendingCropSave = null;
+  if (pending) return api.setCrop(pending.folder, pending.name, pending.layout, pending.crop)
+    .catch(error => showToast(error.message || 'Could not save crop preview', true));
+  return Promise.resolve();
+}
+
+function rememberCrop() {
+  const image = selectedImage();
+  if (!isCropping() || !image || !mainImageReady || elements['main-image'].hidden) return;
+  const crop = { scale: zoom.scale, x: cropX, y: cropY };
+  image.crops[state.layout] = crop;
+  pendingCropSave = { folder: state.folder, name: image.name, layout: state.layout, crop };
+  clearTimeout(cropSaveTimer);
+  cropSaveTimer = setTimeout(flushCropSave, 200);
+  const button = elements.filmstrip.querySelector('.thumb.selected');
+  if (button) updateThumbnailCrop(button, image);
+}
 
 function updateZoom() {
   const image = elements['main-image'];
-  const width = elements.stage.clientWidth;
-  const height = elements.stage.clientHeight;
-  const fit = image.naturalWidth && image.naturalHeight
-    ? Math.min(width / image.naturalWidth, height / image.naturalHeight) : 0;
-  const maxX = Math.max(0, (image.naturalWidth * fit * zoom.scale - width) / 2);
-  const maxY = Math.max(0, (image.naturalHeight * fit * zoom.scale - height) / 2);
+  const { width, height, outerWidth, outerHeight, borderPixels, fit, maxX, maxY, photoWidth, photoHeight, rotation } = viewGeometry();
+  const mat = elements['photo-mat'];
+  mat.hidden = !borderPixels || image.hidden;
+  mat.style.width = `${outerWidth}px`;
+  mat.style.height = `${outerHeight}px`;
+  mat.style.backgroundColor = state.border.color;
+  elements.stage.classList.toggle('bordered', borderPixels > 0 && !image.hidden);
+  const viewport = elements['photo-viewport'];
+  viewport.style.width = `${width}px`;
+  viewport.style.height = `${height}px`;
+  const baseWidth = image.naturalWidth * fit;
+  const baseHeight = image.naturalHeight * fit;
+  image.style.width = `${baseWidth}px`;
+  image.style.height = `${baseHeight}px`;
+  image.style.left = `${(width - baseWidth) / 2}px`;
+  image.style.top = `${(height - baseHeight) / 2}px`;
+  if (isCropping()) { zoom.x = cropX * photoWidth; zoom.y = cropY * photoHeight; }
   zoom.x = Math.max(-maxX, Math.min(maxX, zoom.x));
   zoom.y = Math.max(-maxY, Math.min(maxY, zoom.y));
-  image.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
+  if (isCropping() && mainImageReady) {
+    cropX = photoWidth ? zoom.x / photoWidth : 0;
+    cropY = photoHeight ? zoom.y / photoHeight : 0;
+  }
+  image.style.transform = `translate(${zoom.x}px, ${zoom.y}px) rotate(${rotation}deg) scale(${zoom.scale})`;
   elements.stage.classList.toggle('zoomed', zoom.scale > 1);
+  elements.stage.classList.toggle('cropping', isCropping() && !image.hidden);
+  elements.stage.classList.toggle('crop-movable', isCropping() && spaceHeld);
+  elements['crop-label'].hidden = !isCropping() || image.hidden;
+  elements['crop-label'].textContent = `${layouts[state.layout].label} · Hold Space + drag`;
+  elements['reset-crop'].disabled = !isCropping() || image.hidden;
+  elements['export-image'].disabled = !selectedImage() || !mainImageReady || state.exporting;
+  const canZoom = mainImageReady && !image.hidden;
+  elements['rotation-angle'].value = `${rotation}°`;
+  elements['rotate-left'].disabled = !canZoom || state.rotating;
+  elements['rotate-right'].disabled = !canZoom || state.rotating;
+  elements['reset-rotation'].disabled = !canZoom || state.rotating || !rotation;
+  elements['zoom-slider'].disabled = !canZoom;
+  elements['zoom-percent'].disabled = !canZoom;
+  elements['zoom-in'].disabled = !canZoom || zoom.scale >= 8;
+  elements['zoom-out'].disabled = !canZoom || zoom.scale <= 1;
+  elements['zoom-slider'].value = String(Math.round(Math.log(zoom.scale) / Math.log(8) * 1000));
+  elements['zoom-slider'].setAttribute('aria-valuetext', `${(zoom.scale * 100).toFixed(1)} percent`);
+  if (document.activeElement !== elements['zoom-percent']) elements['zoom-percent'].value = String(Math.round(zoom.scale * 1000) / 10);
   const reset = elements['reset-zoom'];
   reset.hidden = zoom.scale === 1;
-  reset.textContent = `Fit · ${Math.round(zoom.scale * 100)}%`;
+  reset.textContent = `${isCropping() ? 'Fill' : 'Fit'} · ${Math.round(zoom.scale * 100)}%`;
   updateZoomMap(image, width, height, fit);
 }
 
 function updateZoomMap(image, width, height, fit) {
   const map = elements['zoom-map'];
-  map.hidden = zoom.scale <= 1 || image.hidden || !fit;
+  map.hidden = (zoom.scale <= 1 && !isCropping()) || image.hidden || !fit
+    || (mapThumbnailKey === zoom.imageKey && mapThumbnailFailed);
   if (map.hidden) return;
   const canvas = elements['zoom-map-image'];
-  const mapFit = Math.min(Math.min(160, width * 0.25) / image.naturalWidth, 120 / image.naturalHeight);
-  const mapWidth = Math.max(1, Math.round(image.naturalWidth * mapFit));
-  const mapHeight = Math.max(1, Math.round(image.naturalHeight * mapFit));
-  const key = `${zoom.imageKey}\u0000${mapWidth}\u0000${mapHeight}`;
+  const rotation = selectedImage()?.rotation || 0;
+  const dimensions = rotatedDimensions(image.naturalWidth, image.naturalHeight, rotation);
+  const mapFit = Math.min(Math.min(160, width * 0.25) / dimensions.width, 120 / dimensions.height);
+  const mapWidth = Math.max(1, Math.round(dimensions.width * mapFit));
+  const mapHeight = Math.max(1, Math.round(dimensions.height * mapFit));
+  const key = `${zoom.imageKey}\u0000${rotation}\u0000${mapWidth}\u0000${mapHeight}`;
+  if (mapThumbnailKey !== zoom.imageKey) {
+    const sourceKey = zoom.imageKey;
+    const selected = selectedImage();
+    mapThumbnailKey = sourceKey;
+    mapThumbnail = null;
+    mapThumbnailFailed = false;
+    mapPreviewKey = null;
+    // Reuse the disk thumbnail; drawing the original here forces a full-size
+    // canvas decode/readback on every cropped photo, before its first paint.
+    if (selected) api.getThumbnail(state.folder, selected.name).then(async url => {
+      const thumbnail = new Image();
+      thumbnail.src = url;
+      await thumbnail.decode();
+      if (zoom.imageKey !== sourceKey || mapThumbnailKey !== sourceKey) return;
+      mapThumbnail = thumbnail;
+      updateZoom();
+    }).catch(() => {
+      if (mapThumbnailKey === sourceKey) { mapThumbnailFailed = true; map.hidden = true; }
+    });
+  }
   if (mapPreviewKey !== key) {
     canvas.width = mapWidth * 2;
     canvas.height = mapHeight * 2;
     canvas.style.width = `${mapWidth}px`;
     canvas.style.height = `${mapHeight}px`;
-    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-    mapPreviewKey = key;
+    if (mapThumbnail) {
+      const context = canvas.getContext('2d');
+      const drawWidth = rotation % 180 ? canvas.height : canvas.width;
+      const drawHeight = rotation % 180 ? canvas.width : canvas.height;
+      context.save();
+      context.translate(canvas.width / 2, canvas.height / 2);
+      context.rotate(rotation * Math.PI / 180);
+      context.drawImage(mapThumbnail, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      context.restore();
+      mapPreviewKey = key;
+    }
   }
-  const photoWidth = image.naturalWidth * fit * zoom.scale;
-  const photoHeight = image.naturalHeight * fit * zoom.scale;
+  const photoWidth = dimensions.width * fit * zoom.scale;
+  const photoHeight = dimensions.height * fit * zoom.scale;
   const visibleWidth = Math.min(1, width / photoWidth);
   const visibleHeight = Math.min(1, height / photoHeight);
   const view = elements['zoom-map-viewport'];
@@ -79,16 +391,16 @@ function updateZoomMap(image, width, height, fit) {
 
 function panFromMap(event) {
   const rect = elements['zoom-map-image'].getBoundingClientRect();
-  const image = elements['main-image'];
-  const fit = Math.min(elements.stage.clientWidth / image.naturalWidth, elements.stage.clientHeight / image.naturalHeight);
-  zoom.x = (0.5 - Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))) * image.naturalWidth * fit * zoom.scale;
-  zoom.y = (0.5 - Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))) * image.naturalHeight * fit * zoom.scale;
-  updateZoom();
+  const { photoWidth, photoHeight } = viewGeometry();
+  setZoomPosition((0.5 - clamp((event.clientX - rect.left) / rect.width, 0, 1)) * photoWidth,
+    (0.5 - clamp((event.clientY - rect.top) / rect.height, 0, 1)) * photoHeight);
+  rememberCrop();
 }
 
 function endMapPan() {
   const pointer = mapPointer;
   mapPointer = null;
+  flushCropSave();
   if (pointer !== null && elements['zoom-map'].hasPointerCapture(pointer)) elements['zoom-map'].releasePointerCapture(pointer);
 }
 
@@ -109,7 +421,7 @@ for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
   elements['zoom-map'].addEventListener(type, endMapPan);
 }
 elements['zoom-map'].addEventListener('click', event => {
-  if (event.detail === 0) { zoom.x = zoom.y = 0; updateZoom(); }
+  if (event.detail === 0) { setZoomPosition(0, 0); rememberCrop(); }
 });
 elements['zoom-map'].addEventListener('keydown', event => {
   const directions = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
@@ -117,15 +429,16 @@ elements['zoom-map'].addEventListener('keydown', event => {
   if (!direction) return;
   event.preventDefault();
   event.stopPropagation();
-  zoom.x += direction[0] * elements.stage.clientWidth * 0.15;
-  zoom.y += direction[1] * elements.stage.clientHeight * 0.15;
-  updateZoom();
+  const { width, height } = viewGeometry();
+  setZoomPosition(zoom.x + direction[0] * width * 0.15, zoom.y + direction[1] * height * 0.15);
+  rememberCrop();
 });
 
 function resetZoom() {
   endMapPan();
   endPan();
   zoom.scale = 1;
+  cropX = cropY = 0;
   zoom.x = zoom.y = 0;
   updateZoom();
 }
@@ -133,40 +446,62 @@ function resetZoom() {
 function zoomAt(scale, clientX, clientY) {
   if (!selectedImage() || elements['main-image'].hidden) return;
   const next = Math.max(1, Math.min(8, scale));
-  const rect = elements.stage.getBoundingClientRect();
+  const rect = elements['photo-viewport'].getBoundingClientRect();
   const x = clientX - rect.left - rect.width / 2;
   const y = clientY - rect.top - rect.height / 2;
   const ratio = next / zoom.scale;
-  zoom.x = x - (x - zoom.x) * ratio;
-  zoom.y = y - (y - zoom.y) * ratio;
+  const nextX = x - (x - zoom.x) * ratio;
+  const nextY = y - (y - zoom.y) * ratio;
   zoom.scale = next;
-  updateZoom();
+  setZoomPosition(nextX, nextY);
+  rememberCrop();
 }
 
+function zoomFromControl(scale) {
+  const rect = elements['photo-viewport'].getBoundingClientRect();
+  zoomAt(scale, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+elements['zoom-slider'].addEventListener('input', () => zoomFromControl(8 ** (Number(elements['zoom-slider'].value) / 1000)));
+elements['zoom-percent'].addEventListener('input', () => {
+  const percent = Number(elements['zoom-percent'].value);
+  if (percent >= 100 && percent <= 800) zoomFromControl(percent / 100);
+});
+elements['zoom-percent'].addEventListener('change', () => {
+  const percent = clamp(Number(elements['zoom-percent'].value) || 100, 100, 800);
+  elements['zoom-percent'].value = String(percent);
+  zoomFromControl(percent / 100);
+});
+elements['zoom-in'].addEventListener('click', () => zoomFromControl(zoom.scale + 0.01));
+elements['zoom-out'].addEventListener('click', () => zoomFromControl(zoom.scale - 0.01));
+
 function endPan() {
-  if (zoom.drag && elements.stage.hasPointerCapture(zoom.drag.id)) {
-    elements.stage.releasePointerCapture(zoom.drag.id);
-  }
+  const drag = zoom.drag;
   zoom.drag = null;
+  if (drag && elements.stage.hasPointerCapture(drag.id)) {
+    elements.stage.releasePointerCapture(drag.id);
+  }
   elements.stage.classList.remove('panning');
+  if (drag) flushCropSave();
 }
 
 // Chromium reports trackpad pinches as Ctrl+wheel, as it does mouse-wheel zoom.
 elements.stage.addEventListener('wheel', event => {
-  if (event.ctrlKey) {
+  if (event.ctrlKey || (isCropping() && !event.shiftKey)) {
     event.preventDefault();
     const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? elements.stage.clientHeight : 1);
-    zoomAt(zoom.scale * Math.exp(-Math.max(-200, Math.min(200, delta)) * 0.01), event.clientX, event.clientY);
+    // Keep small trackpad deltas smooth, but cap a coarse mouse-wheel notch at ~5%.
+    const change = -Math.sign(delta) * 0.05 * (1 - Math.exp(-Math.abs(delta) / 5));
+    zoomAt(zoom.scale * Math.exp(change), event.clientX, event.clientY);
   } else if (zoom.scale > 1 && selectedImage()) {
     event.preventDefault();
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? elements.stage.clientHeight : 1;
-    zoom.x -= event.deltaX * unit;
-    zoom.y -= event.deltaY * unit;
-    updateZoom();
+    setZoomPosition(zoom.x - event.deltaX * unit, zoom.y - event.deltaY * unit);
+    rememberCrop();
   }
 }, { passive: false });
 elements.stage.addEventListener('pointerdown', event => {
-  if (zoom.scale <= 1 || event.button !== 0 || event.target.closest('button')) return;
+  if ((isCropping() ? !spaceHeld : zoom.scale <= 1) || elements['main-image'].hidden
+      || event.button !== 0 || event.target.closest('button')) return;
   event.preventDefault();
   zoom.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, panX: zoom.x, panY: zoom.y };
   elements.stage.setPointerCapture(event.pointerId);
@@ -174,20 +509,20 @@ elements.stage.addEventListener('pointerdown', event => {
 });
 elements.stage.addEventListener('pointermove', event => {
   if (!zoom.drag || zoom.drag.id !== event.pointerId) return;
-  zoom.x = zoom.drag.panX + event.clientX - zoom.drag.x;
-  zoom.y = zoom.drag.panY + event.clientY - zoom.drag.y;
-  updateZoom();
+  setZoomPosition(zoom.drag.panX + event.clientX - zoom.drag.x, zoom.drag.panY + event.clientY - zoom.drag.y);
+  rememberCrop();
 });
 for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
   elements.stage.addEventListener(type, endPan);
 }
 elements.stage.addEventListener('dblclick', event => {
   if (event.target.closest('button')) return;
-  if (zoom.scale > 1) resetZoom();
+  if (zoom.scale > 1) { resetZoom(); rememberCrop(); }
   else zoomAt(2, event.clientX, event.clientY);
 });
-elements['reset-zoom'].addEventListener('click', resetZoom);
-elements['main-image'].addEventListener('load', updateZoom);
+elements['reset-zoom'].addEventListener('click', () => { resetZoom(); rememberCrop(); });
+elements['reset-crop'].addEventListener('click', () => { resetZoom(); rememberCrop(); flushCropSave(); });
+elements['main-image'].addEventListener('load', () => { mainImageReady = true; mapPreviewKey = null; updateZoom(); });
 new ResizeObserver(updateZoom).observe(elements.stage);
 
 function visibleImages() {
@@ -216,10 +551,23 @@ function chooseClosestVisible(oldName) {
 
 function applyFolder(folderState) {
   if (!folderState) return;
+  flushCropSave();
   cancelUnmark();
   const sameFolder = folderState.folder === state.folder;
   state.folder = folderState.folder;
-  state.images = folderState.images.map(image => ({ ...image, status: image.status === 'keep' ? 'keep' : 'unreviewed' }));
+  folderRevision += 1;
+  datesLoaded = false;
+  captureDateRequest = null;
+  state.layout = Object.hasOwn(layouts, folderState.layout) ? folderState.layout : 'original';
+  state.border = validBorder(folderState.border) ? { ...folderState.border } : defaultBorder();
+  syncBorderControls();
+  elements['crop-layout'].value = state.layout;
+  elements['crop-layout'].disabled = !state.folder;
+  elements['crop-hint'].textContent = isCropping()
+    ? 'Space + drag to reframe. Use the slider, percentage, or wheel to zoom. Originals stay unchanged.'
+    : 'Originals stay unchanged.';
+  state.images = folderState.images.map(image => ({ ...image, rotation: validRotation(image.rotation) ? image.rotation : 0,
+    crops: image.crops || {}, status: image.status === 'keep' ? 'keep' : 'unreviewed' }));
   previewCache.clear();
   filmstripKey = null;
   const openedName = folderState.selectedName;
@@ -232,7 +580,7 @@ function applyFolder(folderState) {
   if (!state.showNonKeepers && selectedImage()?.status !== 'keep') {
     state.selectedName = chooseClosestVisible(state.selectedName);
   }
-  render();
+  applyPhotoSort();
 }
 
 async function openFolder() {
@@ -267,12 +615,19 @@ async function getPreview(image, size) {
 
 function renderMainImage(image) {
   const key = image ? `${state.folder}\u0000${image.name}\u0000${image.url}` : null;
-  if (zoom.imageKey === key) { updateZoom(); return; }
+  if (zoom.imageKey === key) {
+    if (renderedLayout !== state.layout || renderedRotation !== (image?.rotation || 0)) restoreCrop(image);
+    updateZoom();
+    return;
+  }
+  flushCropSave();
+  mainImageReady = false;
   zoom.imageKey = key;
-  resetZoom();
+  restoreCrop(image);
   previewToken += 1;
   const token = previewToken;
   elements['main-image'].hidden = true;
+  updateZoom();
   elements['main-image'].removeAttribute('src');
   elements['preview-error'].hidden = true;
   if (!image) return;
@@ -289,13 +644,61 @@ function renderMainImage(image) {
       if (token !== previewToken) return;
       elements['main-image'].src = url;
       elements['main-image'].hidden = false;
+      updateZoom();
     }).catch(() => {
       if (token === previewToken) elements['preview-error'].hidden = false;
     });
   } else {
     elements['main-image'].src = image.url;
     elements['main-image'].hidden = false;
+    updateZoom();
   }
+}
+
+function restoreCrop(image) {
+  flushCropSave();
+  renderedLayout = state.layout;
+  renderedRotation = image?.rotation || 0;
+  resetZoom();
+  const crop = image?.crops[state.layout];
+  if (isCropping() && validCrop(crop)) {
+    zoom.scale = crop.scale;
+    cropX = crop.x;
+    cropY = crop.y;
+  }
+}
+
+function updateThumbnailCrop(button, image) {
+  const img = button.querySelector('img');
+  if (!img.naturalWidth || !img.naturalHeight) return;
+  const viewport = button.querySelector('.thumb-viewport');
+  const mat = button.querySelector('.thumb-mat');
+  const rotation = image.rotation || 0;
+  if (!isCropping() && !state.border.enabled && !rotation) {
+    img.removeAttribute('style'); viewport.removeAttribute('style'); mat.hidden = true;
+    delete img.dataset.cropKey; return;
+  }
+  const crop = validCrop(image.crops[state.layout]) ? image.crops[state.layout] : { scale: 1, x: 0, y: 0 };
+  const border = state.border.enabled ? Math.min(button.clientWidth, button.clientHeight) * state.border.width / 100 : 0;
+  const width = button.clientWidth - 2 * border;
+  const height = button.clientHeight - 2 * border;
+  const key = `${state.layout}:${rotation}:${width}:${height}:${crop.scale}:${crop.x}:${crop.y}:${state.border.color}:${state.border.enabled}`;
+  if (img.dataset.cropKey === key) return;
+  img.dataset.cropKey = key;
+  viewport.style.inset = `${border}px`;
+  mat.hidden = !state.border.enabled;
+  mat.style.backgroundColor = state.border.color;
+  const dimensions = rotatedDimensions(img.naturalWidth, img.naturalHeight, rotation);
+  const fitLayout = isCropping() ? state.layout : state.border.enabled ? 'original' : 'square';
+  const { fit, photoWidth, photoHeight, maxX, maxY } = imageGeometry(width, height, dimensions.width, dimensions.height, fitLayout, crop.scale);
+  const baseWidth = img.naturalWidth * fit;
+  const baseHeight = img.naturalHeight * fit;
+  img.style.position = 'absolute';
+  img.style.width = `${baseWidth}px`;
+  img.style.height = `${baseHeight}px`;
+  img.style.left = `${(width - baseWidth) / 2}px`;
+  img.style.top = `${(height - baseHeight) / 2}px`;
+  img.style.transform = `translate(${clamp(crop.x * photoWidth, -maxX, maxX)}px, ${clamp(crop.y * photoHeight, -maxY, maxY)}px) rotate(${rotation}deg) scale(${crop.scale})`;
 }
 
 function renderStage() {
@@ -334,6 +737,10 @@ function renderStage() {
 }
 
 function renderFilmstrip() {
+  elements.filmstrip.classList.toggle('show-filenames', state.showFilenames);
+  elements['show-filenames'].checked = state.showFilenames;
+  elements.filmstrip.classList.toggle('cropping', isCropping());
+  elements.filmstrip.style.setProperty('--crop-ratio', layouts[state.layout].ratio || 1);
   if (!state.showFilmstrip) return;
   const visible = visibleImages();
   const key = `${state.folder}\u0000${visible.map(image => image.name).join('\u0000')}`;
@@ -341,18 +748,42 @@ function renderFilmstrip() {
   if (key !== filmstripKey) {
     thumbnailObserver?.disconnect();
     elements.filmstrip.replaceChildren();
+    filmstripButtons.clear();
+    dirtyThumbnails.clear();
     const fragment = document.createDocumentFragment();
+    const folder = state.folder;
+    const imagesByName = new Map(visible.map(image => [image.name, image]));
+    const waiting = new Set();
+    let active = 0;
+    function loadVisibleThumbnails() {
+      while (active < 2 && waiting.size) {
+        const target = waiting.values().next().value;
+        waiting.delete(target);
+        if (!target.isConnected || state.folder !== folder) continue;
+        observer.unobserve(target);
+        const image = imagesByName.get(target.dataset.name);
+        if (!image) continue;
+        const img = target.querySelector('img');
+        const fallback = () => {
+          if (!img.isConnected || state.folder !== folder) return;
+          img.onerror = null;
+          if (image.nativePreview) {
+            getPreview(image, 320).then(url => { if (img.isConnected) img.src = url; }).catch(() => {});
+          } else img.src = image.url;
+        };
+        img.onerror = fallback;
+        active += 1;
+        api.getThumbnail(folder, image.name).then(url => {
+          if (img.isConnected && state.folder === folder) img.src = url;
+        }).catch(fallback).finally(() => { active -= 1; loadVisibleThumbnails(); });
+      }
+    }
     const observer = new IntersectionObserver(entries => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
-        const image = state.images.find(item => item.name === entry.target.dataset.name);
-        if (!image) continue;
-        const img = entry.target.querySelector('img');
-        if (image.nativePreview) {
-          getPreview(image, 320).then(url => { if (img.isConnected) img.src = url; }).catch(() => {});
-        } else img.src = image.url;
+        if (entry.isIntersecting) waiting.add(entry.target);
+        else waiting.delete(entry.target);
       }
+      loadVisibleThumbnails();
     }, { root: elements.filmstrip, rootMargin: '120px' });
     thumbnailObserver = observer;
 
@@ -361,9 +792,24 @@ function renderFilmstrip() {
       button.type = 'button';
       button.className = 'thumb';
       button.dataset.name = image.name;
+      filmstripButtons.set(image.name, button);
+      button.title = image.name;
       const img = document.createElement('img');
       img.alt = '';
-      button.append(img);
+      img.decoding = 'async';
+      img.onload = () => updateThumbnailCrop(button, image);
+      const mat = document.createElement('span');
+      mat.className = 'thumb-mat';
+      mat.hidden = true;
+      const viewport = document.createElement('span');
+      viewport.className = 'thumb-viewport';
+      viewport.append(img);
+      button.append(mat, viewport);
+      const filename = document.createElement('span');
+      filename.className = 'thumb-filename';
+      filename.textContent = image.name;
+      button.append(filename);
+      updateThumbnailState(button, image);
       button.addEventListener('click', () => {
         state.selectedName = image.name;
         render();
@@ -373,30 +819,41 @@ function renderFilmstrip() {
     elements.filmstrip.append(fragment);
     elements.filmstrip.querySelectorAll('.thumb').forEach(button => observer.observe(button));
     filmstripKey = key;
-    lastScrolledName = null;
+    filmstripSelection = state.selectedName;
+    filmstripAppearanceKey = null;
   }
+  const appearance = `${state.layout}:${state.border.enabled}:${state.border.width}:${state.border.color}`;
+  if (appearance !== filmstripAppearanceKey) {
+    for (const image of visible) updateThumbnailCrop(filmstripButtons.get(image.name), image);
+    filmstripAppearanceKey = appearance;
+  }
+  if (filmstripSelection !== state.selectedName) {
+    const previous = filmstripButtons.get(filmstripSelection);
+    const next = filmstripButtons.get(state.selectedName);
+    previous?.classList.remove('selected');
+    previous?.setAttribute('aria-current', 'false');
+    next?.classList.add('selected');
+    next?.setAttribute('aria-current', 'true');
+    filmstripSelection = state.selectedName;
+  }
+  for (const name of dirtyThumbnails) {
+    const button = filmstripButtons.get(name);
+    const image = state.images.find(image => image.name === name);
+    if (button && image) updateThumbnailState(button, image);
+  }
+  dirtyThumbnails.clear();
+}
 
-  const imagesByName = new Map(visible.map(image => [image.name, image]));
-  for (const button of elements.filmstrip.querySelectorAll('.thumb')) {
-    const image = imagesByName.get(button.dataset.name);
-    button.classList.toggle('selected', image.name === state.selectedName);
-    button.setAttribute('aria-current', String(image.name === state.selectedName));
-    button.setAttribute('aria-label', `${image.name}, ${image.status === 'keep' ? 'keeper' : 'unmarked'}`);
-    let marker = button.querySelector('.thumb-status');
-    if (image.status === 'unreviewed') marker?.remove();
-    else {
-      if (!marker) {
-        marker = document.createElement('span');
-        button.append(marker);
-      }
-      marker.className = `thumb-status ${image.status}`;
-      marker.textContent = '✓';
-    }
-  }
-  const selected = elements.filmstrip.querySelector('.thumb.selected');
-  if (selected && lastScrolledName !== state.selectedName) {
-    lastScrolledName = state.selectedName;
-    requestAnimationFrame(() => selected.scrollIntoView({ block: 'center', inline: 'nearest' }));
+function updateThumbnailState(button, image) {
+  button.classList.toggle('selected', image.name === state.selectedName);
+  button.setAttribute('aria-current', String(image.name === state.selectedName));
+  button.setAttribute('aria-label', `${image.name}, ${image.status === 'keep' ? 'keeper' : 'unmarked'}`);
+  let marker = button.querySelector('.thumb-status');
+  if (image.status === 'unreviewed') marker?.remove();
+  else {
+    if (!marker) { marker = document.createElement('span'); button.append(marker); }
+    marker.className = `thumb-status ${image.status}`;
+    marker.textContent = '✓';
   }
 }
 
@@ -410,6 +867,8 @@ function render() {
 function renderPanels() {
   elements['app-shell'].classList.toggle('sidebar-hidden', !state.showSidebar);
   elements['filmstrip-panel'].hidden = !state.showFilmstrip;
+  elements['filmstrip-resizer'].parentElement.classList.toggle('collapsed', !state.showFilmstrip);
+  sizePanels();
   for (const [id, shown, label] of [
     ['toggle-sidebar', state.showSidebar, 'sidebar'],
     ['toggle-filmstrip', state.showFilmstrip, 'photo strip']
@@ -451,6 +910,7 @@ async function setStatus(status) {
   try {
     await api.setStatus(image.name, status);
     image.status = status;
+    dirtyThumbnails.add(image.name);
     const after = visibleImages();
     let next = null;
     const steps = state.loopNavigation ? before.length : before.length - index - 1;
@@ -520,6 +980,94 @@ async function copyKeepers() {
 }
 
 elements['open-folder'].addEventListener('click', openFolder);
+
+async function rotateSelectedPhoto(change) {
+  const image = selectedImage();
+  const folder = state.folder;
+  if (!image || !mainImageReady || state.rotating) return;
+  rememberCrop();
+  state.rotating = true;
+  updateZoom();
+  try {
+    await flushCropSave();
+    const rotation = change === 'reset' ? 0 : ((image.rotation || 0) + change + 360) % 360;
+    const result = await api.setRotation(folder, image.name, rotation);
+    if (folder !== state.folder) return;
+    image.rotation = result.rotation;
+    image.crops = result.crops;
+    const button = filmstripButtons.get(image.name);
+    if (button) updateThumbnailCrop(button, image);
+    renderStage();
+  } catch (error) { showToast(error.message || 'Could not save rotation', true); }
+  finally { state.rotating = false; updateZoom(); }
+}
+elements['rotate-left'].addEventListener('click', () => rotateSelectedPhoto(-90));
+elements['rotate-right'].addEventListener('click', () => rotateSelectedPhoto(90));
+elements['reset-rotation'].addEventListener('click', () => rotateSelectedPhoto('reset'));
+
+function syncBorderControls() {
+  elements['border-enabled'].checked = state.border.enabled;
+  elements['border-options'].hidden = !state.border.enabled;
+  elements['border-width'].value = state.border.width;
+  elements['border-width-label'].value = `${state.border.width}%`;
+  elements['border-color'].value = state.border.color;
+  elements['border-enabled'].disabled = !state.folder;
+}
+function changeBorder(save) {
+  state.border = { enabled: elements['border-enabled'].checked, width: Number(elements['border-width'].value), color: elements['border-color'].value };
+  syncBorderControls();
+  updateZoom();
+  updateLoadedThumbnailCrops();
+  // Turning a border off also clears thumbnail mats in Original mode.
+  if (!state.border.enabled && !isCropping()) {
+    const byName = new Map(state.images.map(image => [image.name, image]));
+    for (const button of elements.filmstrip.children) if (byName.has(button.dataset.name)) updateThumbnailCrop(button, byName.get(button.dataset.name));
+  }
+  if (save && state.folder) api.setBorder(state.folder, { ...state.border }).catch(error => showToast(error.message || 'Could not save border', true));
+}
+elements['border-enabled'].addEventListener('change', () => changeBorder(true));
+for (const id of ['border-width', 'border-color']) {
+  elements[id].addEventListener('input', () => changeBorder(false));
+  elements[id].addEventListener('change', () => changeBorder(true));
+}
+elements['export-image'].addEventListener('click', async () => {
+  const image = selectedImage();
+  if (!image || !mainImageReady || state.exporting) return;
+  rememberCrop();
+  const settings = { folder: state.folder, name: image.name, layout: state.layout,
+    crop: isCropping() ? { scale: zoom.scale, x: cropX, y: cropY } : { scale: 1, x: 0, y: 0 }, border: { ...state.border }, rotation: image.rotation || 0 };
+  state.exporting = true;
+  elements['export-image'].textContent = 'Exporting…';
+  updateZoom();
+  try {
+    await flushCropSave();
+    const result = await api.exportImage(settings);
+    if (result) showToast(`Exported ${result.width} × ${result.height} pixels.`);
+  } catch (error) { showToast(error.message || 'Could not export image', true); }
+  finally {
+    state.exporting = false;
+    elements['export-image'].textContent = 'Export image…';
+    updateZoom();
+  }
+});
+
+for (const action of ['fullscreen', 'reload', 'quit']) {
+  document.getElementById(`app-${action}`).addEventListener('click', async () => {
+    await flushCropSave();
+    api.appAction(action).catch(error => showToast(error.message || 'Could not perform app action', true));
+  });
+}
+
+elements['crop-layout'].addEventListener('change', () => {
+  flushCropSave();
+  state.layout = elements['crop-layout'].value;
+  elements['crop-hint'].textContent = isCropping()
+    ? 'Space + drag to reframe. Use the slider, percentage, or wheel to zoom. Originals stay unchanged.'
+    : 'Originals stay unchanged.';
+  api.setLayout(state.folder, state.layout).catch(error => showToast(error.message || 'Could not save layout', true));
+  render();
+  elements.stage.focus({ preventScroll: true });
+});
 elements['empty-open-folder'].addEventListener('click', openFolder);
 elements['toggle-non-keepers'].addEventListener('click', toggleNonKeepers);
 elements['toggle-loop'].addEventListener('click', () => {
@@ -552,8 +1100,12 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (event.target === elements['zoom-map'] && event.key.startsWith('Arrow')) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT', 'SUMMARY'].includes(document.activeElement?.tagName)) return;
+  if (event.code === 'Space' || event.key === ' ') {
+    if (isCropping()) { event.preventDefault(); spaceHeld = true; updateZoom(); }
+    return;
+  }
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
-  if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
   const key = event.key.toLowerCase();
   if (key === 'arrowdown' || key === 'j') move(1);
   else if (key === 'arrowup' || key === 'k') move(-1);
@@ -562,10 +1114,24 @@ document.addEventListener('keydown', event => {
   else if (key === 'b') toggleSidebar();
   else if (key === 'f') toggleFilmstrip();
   else if (key === 'c') copyKeepers();
-  else if (key === 'z') resetZoom();
+  else if (key === 'z') { resetZoom(); rememberCrop(); }
+  else if (key === '+' || key === '=') zoomFromControl(zoom.scale + 0.01);
+  else if (key === '-') zoomFromControl(zoom.scale - 0.01);
   else return;
   event.preventDefault();
 }, true);
+
+function releaseSpace() {
+  spaceHeld = false;
+  endPan();
+  updateZoom();
+  flushCropSave();
+}
+document.addEventListener('keyup', event => {
+  if (event.code === 'Space' || event.key === ' ') { if (spaceHeld) event.preventDefault(); releaseSpace(); }
+});
+window.addEventListener('blur', releaseSpace);
+window.addEventListener('beforeunload', flushCropSave);
 
 api.onFolderChanged(applyFolder);
 api.getInitialState().then(applyFolder).catch(error => showToast(error.message || 'Could not load the library', true));

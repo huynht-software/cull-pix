@@ -3,6 +3,22 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { isImageName, needsNativePreview } = require('./library');
+const { createThumbnailCache } = require('./thumbnail-cache');
+const { layouts, validCrop, validBorder, defaultBorder, validRotation, rotateCrop } = require('./crop');
+const { exportImage } = require('./export-image');
+const { createUpdateController } = require('./updates');
+let updates;
+if (app.isPackaged) app.setPath('userData', path.join(app.getPath('appData'), 'cull-pix'));
+const { createCaptureDateReader } = require('./capture-dates');
+const captureDates = createCaptureDateReader();
+const dateRequests = new Map();
+let folderGeneration = 0;
+
+const thumbnails = createThumbnailCache(async (source, edge) => {
+  const image = await nativeImage.createThumbnailFromPath(source, { width: edge, height: edge });
+  if (image.isEmpty()) throw new Error('Thumbnail unavailable for this format');
+  return image.toJPEG(80);
+});
 
 let window;
 let currentFolder = null;
@@ -87,18 +103,25 @@ async function readStore() {
   }
 }
 
-async function saveStore() {
+let storeWrites = Promise.resolve();
+function saveStore() {
   const target = storePath();
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const temporary = `${target}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(store, null, 2));
-  await fs.rename(temporary, target);
+  const snapshot = JSON.stringify(store, null, 2);
+  storeWrites = storeWrites.catch(() => {}).then(async () => {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const temporary = `${target}.tmp`;
+    await fs.writeFile(temporary, snapshot);
+    await fs.rename(temporary, target);
+  });
+  return storeWrites;
 }
 
 function folderState() {
   return {
     folder: currentFolder,
     selectedName: openedName,
+    layout: store.folders[currentFolder]?.layout || 'original',
+    border: store.folders[currentFolder]?.border || defaultBorder(),
     images: images.map(image => ({ ...image }))
   };
 }
@@ -112,15 +135,19 @@ async function loadFolder(folder) {
 
   const statuses = store.folders[folder]?.statuses || {};
   currentFolder = folder;
+  folderGeneration += 1;
   openedName = null;
   images = names.map(name => ({
     name,
     status: statuses[name] === 'keep' ? 'keep' : 'unreviewed',
     url: pathToFileURL(path.join(folder, name)).href,
-    nativePreview: needsNativePreview(name)
+    nativePreview: needsNativePreview(name),
+    crops: store.folders[folder]?.crops?.[name] || {},
+    rotation: store.folders[folder]?.rotations?.[name] || 0
   }));
   store.recentFolder = folder;
   await saveStore();
+  thumbnails.warmFolder(folder, names);
   return folderState();
 }
 
@@ -151,11 +178,43 @@ async function createWindow() {
     }
   });
   window.on('closed', () => { window = null; rendererReady = false; });
+  if (process.platform !== 'darwin') {
+    window.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return;
+      const key = input.key.toLowerCase();
+      const command = input.control && !input.alt && !input.meta;
+      if (command && key === 'o') {
+        event.preventDefault();
+        chooseFolder().then(state => {
+          if (state && window && !window.isDestroyed()) window.webContents.send('folder-changed', state);
+        }).catch(error => dialog.showErrorBox('Could not open folder', error.message));
+      } else if (key === 'f11') {
+        event.preventDefault();
+        window.setFullScreen(!window.isFullScreen());
+      } else if (command && key === 'r') {
+        event.preventDefault();
+        window.webContents.reload();
+      } else if (command && key === 'q') {
+        event.preventDefault();
+        app.quit();
+      } else if (command && key === 'c') {
+        event.preventDefault();
+        window.webContents.copy();
+      } else if (command && key === 'a') {
+        event.preventDefault();
+        window.webContents.selectAll();
+      }
+    });
+  }
   await window.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   rendererReady = true;
 }
 
 function buildMenu() {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+    return;
+  }
   const template = [
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
     {
@@ -190,6 +249,16 @@ app.whenReady().then(async () => {
     return;
   }
   await readStore();
+  updates = createUpdateController({ app, updater: require('electron-updater').autoUpdater,
+    available: app.isPackaged && require('../package.json').autoUpdateSupported !== false
+      && require('node:fs').existsSync(path.join(process.resourcesPath, 'app-update.yml')),
+    unavailableReason: process.platform === 'darwin' && require('../package.json').autoUpdateSupported === false
+      ? 'Automatic updates on macOS require an Apple-signed release build.' : undefined,
+    notify: state => { for (const target of BrowserWindow.getAllWindows()) target.webContents.send('update-state', state); } });
+  ipcMain.handle('get-update-state', () => updates.getState());
+  ipcMain.handle('check-updates', () => updates.check());
+  ipcMain.handle('install-update', () => updates.install());
+  updates.start();
 
   ipcMain.handle('get-initial-state', async () => {
     await fileOpenQueue;
@@ -201,6 +270,100 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('choose-folder', chooseFolder);
+
+  ipcMain.handle('set-border', async (_event, { folder, border }) => {
+    if (!folder || folder !== currentFolder || !validBorder(border)) throw new Error('Invalid border settings');
+    store.folders[folder] ||= { statuses: {} };
+    store.folders[folder].border = { ...border };
+    await saveStore();
+  });
+
+  ipcMain.handle('export-image', async (_event, { folder, name, layout, crop, border, rotation = 0 }) => {
+    if (!folder || folder !== currentFolder || !images.some(image => image.name === name)
+        || !Object.hasOwn(layouts, layout) || !validCrop(crop) || !validBorder(border) || !validRotation(rotation)) throw new Error('Invalid export request');
+    const source = path.join(folder, name);
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Export image with crop and border',
+      defaultPath: path.join(typeof store.exportFolder === 'string' ? store.exportFolder : folder, `${path.parse(name).name}-${layout}-export.jpg`),
+      filters: [{ name: 'JPEG image', extensions: ['jpg', 'jpeg'] }, { name: 'PNG image', extensions: ['png'] }]
+    });
+    if (result.canceled || !result.filePath) return null;
+    if (path.dirname(result.filePath).toLowerCase() === folder.toLowerCase()
+        && images.some(image => image.name.toLowerCase() === path.basename(result.filePath).toLowerCase())) {
+      throw new Error('Choose a new filename so the original photos stay unchanged.');
+    }
+    const exported = await exportImage(source, result.filePath, { layout, crop, border, rotation });
+    store.exportFolder = path.dirname(result.filePath);
+    await saveStore();
+    return exported;
+  });
+
+  ipcMain.handle('set-rotation', async (_event, { folder, name, rotation }) => {
+    const image = images.find(image => image.name === name);
+    if (!folder || folder !== currentFolder || !image || !validRotation(rotation)) throw new Error('Invalid photo rotation');
+    const turns = ((rotation - (image.rotation || 0) + 360) % 360) / 90;
+    const crops = {};
+    for (const [layout, crop] of Object.entries(image.crops)) if (validCrop(crop)) crops[layout] = rotateCrop(crop, turns);
+    image.rotation = rotation;
+    image.crops = crops;
+    store.folders[folder] ||= { statuses: {} };
+    store.folders[folder].rotations ||= {};
+    store.folders[folder].rotations[name] = rotation;
+    store.folders[folder].crops ||= {};
+    store.folders[folder].crops[name] = crops;
+    await saveStore();
+    return { rotation, crops };
+  });
+
+  ipcMain.handle('app-action', (_event, action) => {
+    if (action === 'fullscreen') window?.setFullScreen(!window.isFullScreen());
+    else if (action === 'reload') window?.webContents.reload();
+    else if (action === 'quit') app.quit();
+    else throw new Error('Unknown app action');
+  });
+
+  ipcMain.handle('get-capture-dates', async (_event, folder) => {
+    if (!folder || folder !== currentFolder) throw new Error('Photo folder is no longer open');
+    const generation = folderGeneration;
+    if (!dateRequests.has(generation)) {
+      dateRequests.set(generation, captureDates.readFolder(folder, images.map(image => image.name), () => folderGeneration === generation));
+    }
+    try { return await dateRequests.get(generation); }
+    finally { dateRequests.delete(generation); }
+  });
+
+  ipcMain.handle('set-layout', async (_event, { folder, layout }) => {
+    if (folder !== currentFolder || !folder || !Object.hasOwn(layouts, layout)) throw new Error('Invalid crop layout');
+    store.folders[folder] ||= { statuses: {} };
+    store.folders[folder].layout = layout;
+    await saveStore();
+  });
+
+  ipcMain.handle('set-crop', async (_event, { folder, name, layout, crop }) => {
+    if (!folder || !Object.hasOwn(layouts, layout) || layout === 'original' || !validCrop(crop)) {
+      throw new Error('Invalid crop');
+    }
+    // A debounced save may arrive just after the user opens another folder.
+    const knownFolder = store.folders[folder];
+    if (!knownFolder) throw new Error('Unknown photo folder');
+    if (!isImageName(name) || path.basename(name) !== name) throw new Error('Invalid image name');
+    const saved = { scale: crop.scale, x: crop.x, y: crop.y };
+    knownFolder.crops ||= {};
+    knownFolder.crops[name] ||= {};
+    knownFolder.crops[name][layout] = saved;
+    if (folder === currentFolder) {
+      const image = images.find(image => image.name === name);
+      if (image) image.crops[layout] = saved;
+    }
+    await saveStore();
+  });
+
+  ipcMain.handle('get-thumbnail', async (_event, { folder, name }) => {
+    if (!currentFolder || folder !== currentFolder || !images.some(image => image.name === name)) {
+      throw new Error('Image is no longer in the open folder');
+    }
+    return thumbnails.thumbnail(folder, name);
+  });
 
   ipcMain.handle('set-status', async (_event, { name, status }) => {
     if (status !== 'keep' && status !== 'unreviewed') {
@@ -259,3 +422,4 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+app.on('will-quit', () => updates?.stop());

@@ -28,10 +28,12 @@ packager({
   out: path.join(root, 'dist'),
   overwrite: true,
   prune: true,
+  asar: { unpackDir: 'node_modules/@img' },
   ignore: [
     /^\/dist(\/|$)/,
     /^\/\.git(\/|$)/,
-    /^\/test(\/|$)/
+    /^\/test(\/|$)/,
+    /^\/node_modules\/\./
   ]
 }).then(paths => {
   for (const packagedPath of paths) console.log(`Created ${packagedPath}`);

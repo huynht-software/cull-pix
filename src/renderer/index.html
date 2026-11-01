@@ -6,6 +6,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self'; script-src 'self'">
   <title>Cull Pix</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="../crop.js" defer></script>
+  <script src="../photo-order.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -16,15 +18,15 @@
         <div><div class="brand-name">cull pix<span class="brand-dot">.</span></div><div class="brand-caption">PHOTO REVIEW STUDIO</div></div>
       </div>
 
-      <div class="sidebar-section folder-section">
-        <div class="section-label">WORKSPACE</div>
+      <details class="sidebar-section folder-section" data-section="workspace" open>
+        <summary class="section-label">WORKSPACE</summary>
         <button id="open-folder" class="folder-button" type="button"><span class="folder-icon" aria-hidden="true">▣</span><span>Open a folder</span><span class="button-arrow" aria-hidden="true">↗</span></button>
         <div id="folder-name" class="folder-name">No folder selected</div>
         <button id="keep" class="action-button keep-button" type="button" disabled><span class="action-symbol">✓</span><span class="action-label">Keep photo</span><kbd>L</kbd></button>
-      </div>
+      </details>
 
-      <div class="sidebar-section">
-        <div class="section-label">VIEW</div>
+      <details class="sidebar-section" data-section="view" open>
+        <summary class="section-label">VIEW</summary>
         <button id="toggle-non-keepers" class="view-toggle" type="button" aria-pressed="false">
           <span class="toggle-copy"><span class="toggle-title">Show non-keepers</span><span class="toggle-hint">Press H to toggle</span></span>
           <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
@@ -33,10 +35,38 @@
           <span class="toggle-copy"><span class="toggle-title">Loop navigation</span><span class="toggle-hint">Wrap between first and last photo</span></span>
           <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
         </button>
-      </div>
+      </details>
 
-      <div class="sidebar-section progress-section">
-        <div class="section-label">KEEPER SELECTION</div>
+      <details class="sidebar-section crop-section" data-section="crop" open>
+        <summary class="section-label">CROP &amp; EXPORT</summary>
+        <select id="crop-layout" class="layout-select" aria-label="Crop layout" aria-describedby="crop-hint"></select>
+        <p id="crop-hint" class="crop-hint">Originals stay unchanged.</p>
+        <button id="reset-crop" class="crop-reset" type="button" disabled>Reset this crop</button>
+        <div class="rotation-controls">
+          <span>Rotation <output id="rotation-angle">0°</output></span>
+          <div><button id="rotate-left" type="button" aria-label="Rotate photo 90 degrees left" title="Rotate left 90°">↶ 90°</button><button id="rotate-right" type="button" aria-label="Rotate photo 90 degrees right" title="Rotate right 90°">↷ 90°</button><button id="reset-rotation" type="button">Reset</button></div>
+        </div>
+        <div class="zoom-controls">
+          <label for="zoom-slider">Zoom</label>
+          <div class="zoom-value-row">
+            <button id="zoom-out" type="button" aria-label="Zoom out one percent">−</button>
+            <label class="zoom-percent-label"><input id="zoom-percent" type="number" min="100" max="800" step="0.1" value="100" aria-label="Zoom percentage"><span>%</span></label>
+            <button id="zoom-in" type="button" aria-label="Zoom in one percent">+</button>
+          </div>
+          <input id="zoom-slider" type="range" min="0" max="1000" step="1" value="0" aria-label="Zoom level">
+        </div>
+        <label class="border-toggle"><input id="border-enabled" type="checkbox"> Add border</label>
+        <div id="border-options" class="border-options" hidden>
+          <label for="border-width">Width <output id="border-width-label">3%</output></label>
+          <input id="border-width" type="range" min="0" max="20" step="0.5" value="3" aria-label="Border width in percent">
+          <label for="border-color">Color <input id="border-color" type="color" value="#ffffff"></label>
+        </div>
+        <button id="export-image" class="export-button" type="button" disabled>Export image…</button>
+        <p class="export-hint">Full-resolution copy with crop and border.</p>
+      </details>
+
+      <details class="sidebar-section progress-section" data-section="keepers" open>
+        <summary class="section-label">KEEPER SELECTION</summary>
         <div class="progress-heading"><span id="reviewed-count">0 of 0 kept</span><strong id="reviewed-percent">0%</strong></div>
         <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
         <div class="stat-list">
@@ -44,20 +74,30 @@
           <div class="stat-row"><span class="stat-name"><span class="stat-dot unreviewed"></span>Unmarked</span><strong id="unmarked-count">0</strong></div>
         </div>
         <button id="copy-keepers" class="copy-button" type="button" disabled><span class="copy-glyph" aria-hidden="true">⧉</span><span>Copy keepers</span><span id="copy-count" class="copy-count">0</span></button>
-      </div>
+      </details>
 
-      <div class="shortcuts-card">
-        <div class="section-label">QUICK KEYS</div>
+      <details class="shortcuts-card" data-section="shortcuts" open>
+        <summary class="section-label">QUICK KEYS</summary>
         <div class="shortcut-row"><span>Previous / next</span><span><kbd>↑</kbd><kbd>↓</kbd><kbd>K</kbd><kbd>J</kbd></span></div>
         <div class="shortcut-row"><span>Keep / unmark</span><kbd>L</kbd></div>
         <div class="shortcut-row"><span>Hide / show</span><kbd>H</kbd></div>
         <div class="shortcut-row"><span>Sidebar / strip</span><span><kbd>B</kbd><kbd>F</kbd></span></div>
         <div class="shortcut-row"><span>Copy keepers</span><kbd>C</kbd></div>
-        <div class="shortcut-row"><span>Zoom</span><span>Pinch / Ctrl+wheel</span></div>
+        <div class="shortcut-row"><span>Zoom</span><span>Slider / pinch / wheel</span></div>
         <div class="shortcut-row"><span>Reset zoom</span><kbd>Z</kbd></div>
-      </div>
+      </details>
+      <details class="app-controls" data-section="app">
+        <summary>App controls</summary>
+        <button id="check-updates" type="button">Check for updates</button>
+        <button id="install-update" type="button" hidden>Install update &amp; restart</button>
+        <p id="update-status" class="update-status" role="status"></p>
+        <button id="app-fullscreen" type="button">Toggle fullscreen</button>
+        <button id="app-reload" type="button">Reload view</button>
+        <button id="app-quit" type="button">Quit Cull Pix</button>
+      </details>
       <div class="sidebar-footer">Your originals stay where they are.</div>
     </aside>
+    <div id="sidebar-resizer" class="panel-resizer sidebar-resizer" role="separator" aria-label="Resize sidebar" aria-orientation="vertical" tabindex="0" title="Drag to resize sidebar"></div>
     <button id="toggle-sidebar" class="sidebar-edge-toggle" type="button" title="Hide sidebar (B)" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
     </button>
@@ -65,7 +105,7 @@
     <main class="workspace">
       <div class="content">
         <div class="viewer-column">
-        <div id="stage" class="stage">
+        <div id="stage" class="stage" tabindex="0" aria-label="Photo preview">
           <div id="position" class="position">— / —</div>
           <div id="empty-state" class="empty-state">
             <div class="empty-symbol" aria-hidden="true"><div class="empty-frame"><div class="empty-sun"></div><div class="empty-mountain"></div></div></div>
@@ -73,7 +113,9 @@
             <p>Choose a folder to browse your photos and pick the ones worth keeping.</p>
             <button id="empty-open-folder" class="empty-button" type="button">Choose a folder <span aria-hidden="true">↗</span></button>
           </div>
-          <img id="main-image" class="main-image" alt="" draggable="false" hidden>
+          <div id="photo-mat" class="photo-mat" hidden></div>
+          <div id="photo-viewport" class="photo-viewport"><img id="main-image" class="main-image" alt="" draggable="false" hidden></div>
+          <div id="crop-label" class="crop-label" hidden></div>
           <div id="preview-error" class="preview-error" hidden>Preview unavailable for this image on this computer.</div>
           <button id="previous" class="stage-nav previous" type="button" aria-label="Previous photo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg></button>
           <button id="next" class="stage-nav next" type="button" aria-label="Next photo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
@@ -87,10 +129,23 @@
         </div>
 
         <div class="filmstrip-edge">
+          <div id="filmstrip-resizer" class="panel-resizer filmstrip-resizer" role="separator" aria-label="Resize photo strip" aria-orientation="vertical" tabindex="0" title="Drag to resize photo strip"></div>
           <button id="toggle-filmstrip" class="filmstrip-edge-toggle" type="button" title="Hide photo strip (F)" aria-label="Hide photo strip" aria-controls="filmstrip-panel" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
         </div>
         <div id="filmstrip-panel" class="filmstrip-panel">
-          <div class="filmstrip-heading"><div><span class="section-label">PHOTO STRIP</span><span id="visible-count" class="visible-count">0 photos</span></div><span class="filmstrip-hint">Click any photo to jump</span></div>
+          <div class="filmstrip-heading"><div><span class="section-label">PHOTO STRIP</span><span id="visible-count" class="visible-count">0 photos</span></div>
+            <details id="preview-options" class="preview-options">
+              <summary>Options</summary>
+            <label class="columns-control" for="filmstrip-columns">Columns
+              <select id="filmstrip-columns" aria-label="Photo strip columns"><option value="1">1 column</option><option value="2">2 columns</option><option value="3">3 columns</option><option value="4">4 columns</option></select>
+            </label>
+            <label class="columns-control" for="photo-sort">Sort by
+              <select id="photo-sort"><option value="name-asc">Name · A–Z</option><option value="name-desc">Name · Z–A</option><option value="taken-asc">Taken · oldest first</option><option value="taken-desc">Taken · newest first</option></select>
+            </label>
+            <label class="filename-control"><input id="show-filenames" type="checkbox"> Show filenames</label>
+            <p id="sort-status" class="sort-status" role="status" hidden></p>
+            </details>
+          </div>
           <div id="filmstrip" class="filmstrip" aria-label="Photos in folder"></div>
         </div>
       </div>

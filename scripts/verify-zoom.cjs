@@ -1,8 +1,10 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const timeout = setTimeout(() => { console.error('Zoom verification timed out'); app.exit(1); }, 20000);
 app.whenReady().then(async () => {
-  const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: {
+  // Chromium's native gesture synthesis needs a visible compositor on Windows.
+  const window = new BrowserWindow({ show: true, width: 1440, height: 900, webPreferences: {
     preload: path.join(__dirname, 'fixtures/review-preload.cjs'), contextIsolation: true, sandbox: false
   } });
   const read = expression => window.webContents.executeJavaScript(expression);
@@ -30,7 +32,7 @@ app.whenReady().then(async () => {
     window.webContents.sendInputEvent({ type: 'mouseWheel', ...point, deltaY: -20, deltaX: 0, modifiers: ['control'], canScroll: true });
     await pause();
     assert.ok(await scale() < zoomed, 'Reverse Ctrl+mouse wheel zooms out');
-    await read("document.getElementById('stage').dispatchEvent(new WheelEvent('wheel',{deltaY:-200,ctrlKey:true,clientX:"+point.x+",clientY:"+point.y+",bubbles:true,cancelable:true}))");
+    await read('zoomFromControl(2)'); // Fine wheel steps intentionally no longer jump straight to deep zoom.
     window.webContents.sendInputEvent({type:'mouseDown',...point,button:'left',clickCount:1});
     window.webContents.sendInputEvent({type:'mouseMove',x:point.x+80,y:point.y+50});
     window.webContents.sendInputEvent({type:'mouseUp',x:point.x+80,y:point.y+50,button:'left',clickCount:1});
@@ -69,5 +71,5 @@ app.whenReady().then(async () => {
     assert.ok(await scale() <= 8, 'Zoom is bounded');
     console.log('Zoom checks passed: native Chromium pinch, Ctrl+wheel, fixed UI, dragging, scroll panning, reset, panel resize, photo navigation.');
   } catch (error) { console.error(error); process.exitCode = 1; }
-  finally { window.destroy(); app.quit(); }
+  finally { clearTimeout(timeout); window.destroy(); app.quit(); }
 });

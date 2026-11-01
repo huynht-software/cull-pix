@@ -1,0 +1,94 @@
+const { app, BrowserWindow, dialog } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const assert = require('node:assert/strict');
+const { exportGeometry } = require('../src/crop');
+const sharp = require(process.env.CULL_PIX_PACKAGED_APP ? path.join(process.env.CULL_PIX_PACKAGED_APP, 'node_modules/sharp') : 'sharp');
+
+const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'cull-pix-export-'));
+const photos = path.join(fixture, 'photos');
+fs.mkdirSync(photos);
+app.setPath('userData', path.join(fixture, 'profile'));
+const source = path.join(photos, 'full-resolution.jpg');
+const destination = path.join(fixture, 'export.png');
+const pause = () => new Promise(resolve => setTimeout(resolve, 80));
+let window;
+const read = code => window.webContents.executeJavaScript(code);
+async function waitFor(check, message) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    try { if (await check()) return; } catch { /* Wait for startup/async export. */ }
+    await pause();
+  }
+  throw new Error(message);
+}
+const timeout = setTimeout(() => { console.error('Export verification timed out'); app.exit(1); }, 30000);
+(async () => {
+  await sharp({ create: { width: 4200, height: 3000, channels: 3, background: '#d96732' } }).jpeg({ quality: 100 }).toFile(source);
+  const original = fs.readFileSync(source);
+  process.argv.push(source);
+  app.on('browser-window-created', (_event, created) => {
+    created.webContents.setBackgroundThrottling(false);
+    created.once('ready-to-show', () => { created.show(); created.focus(); });
+  });
+  let lastDefaultPath;
+  dialog.showSaveDialog = async (_window, options) => { lastDefaultPath = options.defaultPath; return { canceled: false, filePath: destination }; };
+  require(process.env.CULL_PIX_PACKAGED_APP ? path.join(process.env.CULL_PIX_PACKAGED_APP, 'src/main.js') : '../src/main');
+  await app.whenReady();
+  await waitFor(async () => {
+    window = BrowserWindow.getAllWindows()[0];
+    return window?.webContents.getURL().endsWith('/index.html') && await read('mainImageReady && state.images.length === 1');
+  }, 'Production viewer did not load');
+  await read("elements['crop-layout'].value = 'square'; elements['crop-layout'].dispatchEvent(new Event('change'))");
+  await waitFor(() => read('mainImageReady'), 'Crop preview did not load');
+  await read("elements['border-enabled'].click(); elements['border-width'].value = '5'; elements['border-color'].value = '#112233'; elements['border-width'].dispatchEvent(new Event('change'))");
+  assert.equal(await read("elements['border-options'].hidden"), false);
+  assert.equal(await read("getComputedStyle(elements['photo-mat']).backgroundColor"), 'rgb(17, 34, 51)');
+  const frame = await read("(() => { const outer = elements['photo-mat'].getBoundingClientRect(); const inner = elements['photo-viewport'].getBoundingClientRect(); const photo = elements['main-image'].getBoundingClientRect(); return {ratio:outer.width/outer.height, margin:(outer.width-inner.width)/2/outer.width, filled:photo.left<=inner.left+1 && photo.right>=inner.right-1 && photo.top<=inner.top+1 && photo.bottom>=inner.bottom-1}; })()");
+  assert.ok(Math.abs(frame.ratio - 1) < 0.001 && Math.abs(frame.margin - 0.05) < 0.001 && frame.filled);
+  await read("elements['export-image'].click()");
+  await waitFor(async () => fs.existsSync(destination) && await read('!state.exporting'), 'Full-resolution export did not finish');
+  const crop = await read('state.images[0].crops.square');
+  const expected = exportGeometry(4200, 3000, 'square', crop, { enabled: true, width: 5, color: '#112233' });
+  const metadata = await sharp(destination).metadata();
+  assert.equal(metadata.width, expected.outputWidth);
+  assert.equal(metadata.height, expected.outputHeight);
+  assert.ok(expected.width > 2600);
+  const pixel = [...await sharp(destination).extract({ left: 0, top: 0, width: 1, height: 1 }).removeAlpha().raw().toBuffer()];
+  assert.deepEqual(pixel, [17, 34, 51]);
+  await pause();
+  const screenshot = await window.webContents.capturePage();
+  fs.writeFileSync(path.join(__dirname, '../node_modules/.border-preview.png'), screenshot.toPNG());
+  await waitFor(() => JSON.parse(fs.readFileSync(path.join(fixture, 'profile', 'reviews.json'), 'utf8')).folders[photos]?.border?.color === '#112233', 'Border settings were not saved');
+  dialog.showSaveDialog = async (_window, options) => { lastDefaultPath = options.defaultPath; return { canceled: true }; };
+  await read("elements['export-image'].click()");
+  await waitFor(() => read('!state.exporting'), 'Cancelled export did not finish');
+  assert.equal(path.dirname(lastDefaultPath), fixture, 'The last successful export folder is remembered');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture, 'profile', 'reviews.json'), 'utf8')).exportFolder, fixture);
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: source });
+  await read("elements['export-image'].click()");
+  await waitFor(() => read('!state.exporting'), 'Original-file protection did not finish');
+  assert.ok((await read('elements.toast.textContent')).includes('original photos stay unchanged'));
+  assert.deepEqual(fs.readFileSync(source), original);
+  const originalUrl = await read("elements['main-image'].getAttribute('src')");
+  await read("elements['rotate-right'].click()");
+  await waitFor(() => read('!state.rotating && state.images[0].rotation === 90'), 'Rotation was not applied');
+  assert.equal(await read("elements['main-image'].getAttribute('src')"), originalUrl, 'Rotation reuses the loaded image');
+  await read("elements['crop-layout'].value = 'original'; elements['crop-layout'].dispatchEvent(new Event('change'))");
+  const rotatedOutput = path.join(fixture, 'rotated.png');
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: rotatedOutput });
+  await read("elements['export-image'].click()");
+  await waitFor(async () => fs.existsSync(rotatedOutput) && await read('!state.exporting'), 'Rotated export did not finish');
+  const rotatedMetadata = await sharp(rotatedOutput).metadata();
+  assert.equal(rotatedMetadata.width, 3300);
+  assert.equal(rotatedMetadata.height, 4500);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture, 'profile', 'reviews.json'), 'utf8')).folders[photos].rotations['full-resolution.jpg'], 90);
+  await window.webContents.reload();
+  await waitFor(() => read('mainImageReady && state.images[0].rotation === 90'), 'Saved rotation did not survive reload');
+  assert.equal(await read("elements['rotation-angle'].value"), '90°');
+  await read("elements['reset-rotation'].click()");
+  await waitFor(() => read('!state.rotating && state.images[0].rotation === 0'), 'Rotation reset failed');
+  console.log(`Export integration passed: live border preview, color and width, saved settings, ${metadata.width}×${metadata.height} PNG from the original, cancellation and original-file protection.`);
+  clearTimeout(timeout);
+  app.exit(0);
+})().catch(error => { console.error(error); clearTimeout(timeout); app.exit(1); });
