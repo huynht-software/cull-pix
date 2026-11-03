@@ -63,6 +63,7 @@ app.whenReady().then(async () => {
       if (!ratio) continue;
       await selectLayout(layout);
       await assertFilled(ratio);
+      assert.equal(await read("elements['reset-crop'].disabled"), true, 'Changing only the ratio does not enable reset');
       await read("zoomAt(8, elements.stage.getBoundingClientRect().x + 100, elements.stage.getBoundingClientRect().y + 100); setZoomPosition(1e6, -1e6)");
       await assertFilled(ratio);
       await read("zoomAt(0.1, 0, 0)");
@@ -72,6 +73,7 @@ app.whenReady().then(async () => {
     await selectLayout('square');
     await read("elements['zoom-percent'].value = '137.5'; elements['zoom-percent'].dispatchEvent(new Event('input'))");
     assert.ok(Math.abs(await read('zoom.scale') - 1.375) < 1e-8, 'Exact fractional zoom percentage works');
+    assert.equal(await read("elements['reset-crop'].disabled"), false, 'Manual zoom enables reset');
     await read("elements['zoom-in'].click()");
     assert.ok(Math.abs(await read('zoom.scale') - 1.385) < 1e-8, 'Plus button adds one percentage point');
     await read("elements['zoom-out'].click()");
@@ -87,6 +89,7 @@ app.whenReady().then(async () => {
     window.webContents.sendInputEvent({ type: 'mouseWheel', ...point, deltaY: 120, deltaX: 0, canScroll: true });
     await pause();
     assert.ok(await read('zoom.scale > 1 && zoom.scale < 1.06'), 'Plain mouse wheel zooms within the crop in fine steps');
+    assert.equal(await read("elements['reset-crop'].disabled"), false, 'Wheel zoom enables reset');
     await assertFilled(1);
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Input.synthesizePinchGesture', { ...point, scaleFactor: 1.5, gestureSourceType: 'mouse' });
@@ -106,6 +109,7 @@ app.whenReady().then(async () => {
     await drag();
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     assert.ok(await read('zoom.x > 0'), 'Space-drag changes the crop at base zoom');
+    assert.equal(await read("elements['reset-crop'].disabled"), false, 'Panning at base zoom enables reset');
     await assertFilled(1);
     await read('zoomAt(2, elements.stage.getBoundingClientRect().x + 200, elements.stage.getBoundingClientRect().y + 200); rememberCrop(); flushCropSave()');
     const saved = await read('({...state.images[0].crops.square})');
@@ -134,6 +138,34 @@ app.whenReady().then(async () => {
     await waitFor(() => read("elements['zoom-map-image'].getContext('2d').getImageData(10,10,1,1).data[3] === 255"), 'Overview thumbnail did not load');
     const screenshot = await window.webContents.capturePage();
     fs.writeFileSync(path.join(__dirname, '../node_modules/.crop-preview.png'), screenshot.toPNG());
+    const centeredCrop = { scale: 1, x: 0, y: 0 };
+    const assertReset = async () => {
+      assert.equal(await read('state.layout'), 'square', 'Reset keeps the selected ratio');
+      assert.equal(await read("elements['reset-crop'].disabled"), true, 'Reset is disabled for a centered crop at minimum zoom');
+      assert.deepEqual(await read('({ scale: zoom.scale, x: cropX, y: cropY })'), centeredCrop, 'Reset centers the crop at minimum zoom');
+      assert.deepEqual(await read('state.images[0].crops.square'), centeredCrop, 'Reset updates the saved crop and thumbnail source');
+      await assertFilled(1);
+      await waitFor(async () => {
+        const data = JSON.parse(fs.readFileSync(path.join(fixture, 'profile', 'reviews.json'), 'utf8'));
+        return JSON.stringify(data.folders[photos]?.crops?.['a.jpg']?.square) === JSON.stringify(centeredCrop);
+      }, 'Reset crop was not saved to disk');
+    };
+    // Reset while an edited crop is still waiting for its debounced save.
+    await read("zoomFromControl(3); setZoomPosition(90, -60); rememberCrop(); elements['reset-crop'].click()");
+    await assertReset();
+    await read('move(1)');
+    await waitFor(() => read('mainImageReady'), 'Second image did not load after reset');
+    await read('move(-1)');
+    await waitFor(() => read('mainImageReady'), 'Reset image did not reload');
+    await assertReset();
+    await read("zoomFromControl(2); setZoomPosition(70, -40); rememberCrop(); elements['reset-crop'].focus()");
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await pause();
+    await assertReset();
+    await window.webContents.reload();
+    await waitFor(() => read('mainImageReady && state.layout === "square"'), 'Reset crop did not reload');
+    await assertReset();
     await selectLayout('original');
     assert.equal(await read('zoom.scale'), 1);
     await read("api.appAction('fullscreen')");

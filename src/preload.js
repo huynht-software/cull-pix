@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('cullPix', {
   getCaptureDates: folder => ipcRenderer.invoke('get-capture-dates', folder),
   appAction: action => ipcRenderer.invoke('app-action', action),
   setBorder: (folder, border) => ipcRenderer.invoke('set-border', { folder, border }),
+  resetEditing: (folder, name) => ipcRenderer.invoke('reset-editing', { folder, name }),
   setRotation: (folder, name, rotation) => ipcRenderer.invoke('set-rotation', { folder, name, rotation }),
   getUpdateState: () => ipcRenderer.invoke('get-update-state'),
   checkUpdates: () => ipcRenderer.invoke('check-updates'),

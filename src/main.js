@@ -278,6 +278,20 @@ app.whenReady().then(async () => {
     await saveStore();
   });
 
+  ipcMain.handle('reset-editing', async (_event, { folder, name }) => {
+    const image = images.find(image => image.name === name);
+    if (!folder || folder !== currentFolder || !image) throw new Error('Invalid photo reset');
+    const saved = store.folders[folder] ||= { statuses: {} };
+    saved.layout = 'original';
+    saved.border = defaultBorder();
+    if (saved.crops) delete saved.crops[name];
+    if (saved.rotations) delete saved.rotations[name];
+    image.crops = {};
+    image.rotation = 0;
+    await saveStore();
+    return { layout: saved.layout, border: saved.border, crops: {}, rotation: 0 };
+  });
+
   ipcMain.handle('export-image', async (_event, { folder, name, layout, crop, border, rotation = 0 }) => {
     if (!folder || folder !== currentFolder || !images.some(image => image.name === name)
         || !Object.hasOwn(layouts, layout) || !validCrop(crop) || !validBorder(border) || !validRotation(rotation)) throw new Error('Invalid export request');
@@ -405,7 +419,7 @@ app.whenReady().then(async () => {
     }
     const edge = size === 320 ? 320 : 2600;
     const image = await nativeImage.createThumbnailFromPath(path.join(currentFolder, name), {
-      size: { width: edge, height: edge }
+      width: edge, height: edge
     });
     if (image.isEmpty()) throw new Error('A preview is unavailable for this format on this computer');
     return image.toDataURL();

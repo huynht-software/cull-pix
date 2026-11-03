@@ -40,6 +40,8 @@ Sort by **Name (A–Z or Z–A)** or **Taken (oldest or newest first)**. Capture
 
 Selecting or navigating between photos highlights the selection without automatically scrolling or centering the photo strip. Scroll the strip manually to keep your preferred position.
 
+After the current photo loads, the viewer prepares the next and previous visible photos in the background, decoding one at a time. This reduces the decoding delay when browsing sequentially. The adjacent-photo cache holds at most two images and 96 MiB of decoded pixels, discards distant photos, and cancels obsolete preloading when you navigate or switch folders. The viewer retains original resolution for ordinary formats; the first photo and jumps to uncached photos still require decoding.
+
 Supported extensions: JPG, JPEG, PNG, WebP, GIF, BMP, AVIF, HEIC, HEIF, TIFF, and TIF. HEIC/HEIF/TIFF preview support depends on codecs available on the computer. Unsupported previews display an explanatory message; the files can still be categorized.
 
 Review decisions are stored in Cull Pix's local application data as `reviews.json`. The source photos are never modified. The clipboard contains file references to the keeper images, so the original files must remain in place until you paste them.
@@ -71,6 +73,8 @@ Click **Export image…** to save the selected image as **JPEG** or **PNG**, wit
 The originals stay unchanged. **Copy keepers** still copies references to the originals; use **Export image…** for a rendered copy.
 
 The last successful export folder is remembered across photos, folders, and app restarts. Cancelling or failing an export does not change it.
+
+**Reset all settings** restores Original layout, fit zoom, no rotation, and the default disabled border. It clears all saved crop positions for the selected photo. The folder's layout and border are shared; other photos' saved crops, rotations, keeper decisions, and the remembered export folder are preserved.
 
 ## Zoom
 

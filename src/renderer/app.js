@@ -9,7 +9,7 @@ const elements = Object.fromEntries([
   'reviewed-count', 'reviewed-percent', 'progress-fill', 'keeper-count',
   'unmarked-count', 'copy-keepers', 'copy-count',
   'position', 'stage', 'empty-state', 'main-image', 'photo-viewport',
-  'crop-layout', 'crop-hint', 'crop-label', 'reset-crop', 'photo-mat',
+  'crop-layout', 'crop-hint', 'crop-label', 'reset-crop', 'reset-editing', 'photo-mat',
   'border-enabled', 'border-options', 'border-width', 'border-width-label', 'border-color', 'export-image',
   'zoom-slider', 'zoom-percent', 'zoom-in', 'zoom-out',
   'rotate-left', 'rotate-right', 'reset-rotation', 'rotation-angle',
@@ -27,6 +27,7 @@ const state = {
   border: defaultBorder(),
   exporting: false,
   rotating: false,
+  resetting: false,
   showNonKeepers: true,
   loopNavigation: false,
   showSidebar: true,
@@ -39,6 +40,13 @@ const state = {
   busy: false
 };
 const previewCache = new Map();
+// Keep adjacent originals decoded, rather than starting their decode on a keypress.
+// Both entry count and retained RGBA bytes are bounded; exports still use originals.
+const decodedNeighbors = new Map();
+const neighborBudget = 96 * 1024 * 1024;
+let neighborTimer;
+let neighborGeneration = 0;
+let neighborWorker = false;
 let toastTimer;
 let previewToken = 0;
 let thumbnailObserver;
@@ -267,6 +275,7 @@ function flushCropSave() {
 }
 
 function rememberCrop() {
+  if (state.resetting) return;
   const image = selectedImage();
   if (!isCropping() || !image || !mainImageReady || elements['main-image'].hidden) return;
   const crop = { scale: zoom.scale, x: cropX, y: cropY };
@@ -309,9 +318,12 @@ function updateZoom() {
   elements.stage.classList.toggle('crop-movable', isCropping() && spaceHeld);
   elements['crop-label'].hidden = !isCropping() || image.hidden;
   elements['crop-label'].textContent = `${layouts[state.layout].label} · Hold Space + drag`;
-  elements['reset-crop'].disabled = !isCropping() || image.hidden;
-  elements['export-image'].disabled = !selectedImage() || !mainImageReady || state.exporting;
-  const canZoom = mainImageReady && !image.hidden;
+  elements['reset-crop'].disabled = !isCropping() || !mainImageReady || image.hidden
+    || (zoom.scale === 1 && zoom.x === 0 && zoom.y === 0);
+  elements['export-image'].disabled = !selectedImage() || !mainImageReady || state.exporting || state.resetting;
+  elements['reset-editing'].disabled = !selectedImage() || state.exporting || state.rotating || state.resetting;
+  for (const id of ['crop-layout', 'border-enabled', 'border-width', 'border-color']) elements[id].disabled = !state.folder || state.resetting;
+  const canZoom = mainImageReady && !image.hidden && !state.resetting;
   elements['rotation-angle'].value = `${rotation}°`;
   elements['rotate-left'].disabled = !canZoom || state.rotating;
   elements['rotate-right'].disabled = !canZoom || state.rotating;
@@ -522,7 +534,7 @@ elements.stage.addEventListener('dblclick', event => {
 });
 elements['reset-zoom'].addEventListener('click', () => { resetZoom(); rememberCrop(); });
 elements['reset-crop'].addEventListener('click', () => { resetZoom(); rememberCrop(); flushCropSave(); });
-elements['main-image'].addEventListener('load', () => { mainImageReady = true; mapPreviewKey = null; updateZoom(); });
+elements['main-image'].addEventListener('load', () => { mainImageReady = true; mapPreviewKey = null; updateZoom(); scheduleNeighbors(); });
 new ResizeObserver(updateZoom).observe(elements.stage);
 
 function visibleImages() {
@@ -569,6 +581,9 @@ function applyFolder(folderState) {
   state.images = folderState.images.map(image => ({ ...image, rotation: validRotation(image.rotation) ? image.rotation : 0,
     crops: image.crops || {}, status: image.status === 'keep' ? 'keep' : 'unreviewed' }));
   previewCache.clear();
+  decodedNeighbors.clear();
+  neighborGeneration += 1;
+  clearTimeout(neighborTimer);
   filmstripKey = null;
   const openedName = folderState.selectedName;
   if (openedName && state.images.some(image => image.name === openedName)) state.showNonKeepers = true;
@@ -609,8 +624,51 @@ function renderStats() {
 
 async function getPreview(image, size) {
   const key = `${state.folder}\u0000${image.name}\u0000${size}`;
-  if (!previewCache.has(key)) previewCache.set(key, api.getNativePreview(image.name, size));
+  if (!previewCache.has(key)) {
+    const request = api.getNativePreview(image.name, size);
+    previewCache.set(key, request);
+    request.catch(() => { if (previewCache.get(key) === request) previewCache.delete(key); });
+    while (previewCache.size > 4) previewCache.delete(previewCache.keys().next().value);
+  }
   return previewCache.get(key);
+}
+
+function scheduleNeighbors() {
+  clearTimeout(neighborTimer);
+  const generation = ++neighborGeneration;
+  neighborTimer = setTimeout(async () => {
+    if (neighborWorker || !mainImageReady) return;
+    neighborWorker = true;
+    try {
+      const visible = visibleImages();
+      const index = visible.findIndex(image => image.name === state.selectedName);
+      const neighbors = [1, -1].map(offset => {
+        const target = index + offset;
+        return state.loopNavigation ? visible[(target + visible.length) % visible.length] : visible[target];
+      }).filter(image => image && image.name !== state.selectedName);
+      const wanted = new Set(neighbors.map(image => image.url));
+      for (const key of decodedNeighbors.keys()) if (!wanted.has(key)) decodedNeighbors.delete(key);
+      for (const image of neighbors) {
+        if (generation !== neighborGeneration) break;
+        if (decodedNeighbors.has(image.url)) continue;
+        try {
+          const url = image.nativePreview ? await getPreview(image, 2600) : image.url;
+          if (generation !== neighborGeneration) break;
+          const decoded = new Image();
+          decoded.decoding = 'async';
+          decoded.src = url;
+          await decoded.decode();
+          if (generation !== neighborGeneration) break;
+          const bytes = decoded.naturalWidth * decoded.naturalHeight * 4;
+          const used = [...decodedNeighbors.values()].reduce((sum, item) => sum + item.bytes, 0);
+          if (used + bytes <= neighborBudget) decodedNeighbors.set(image.url, { image: decoded, bytes });
+        } catch { /* A speculative decode must never interrupt photo review. */ }
+      }
+    } finally {
+      neighborWorker = false;
+      if (generation !== neighborGeneration && mainImageReady) scheduleNeighbors();
+    }
+  }, 120);
 }
 
 function renderMainImage(image) {
@@ -621,6 +679,8 @@ function renderMainImage(image) {
     return;
   }
   flushCropSave();
+  clearTimeout(neighborTimer);
+  neighborGeneration += 1;
   mainImageReady = false;
   zoom.imageKey = key;
   restoreCrop(image);
@@ -628,7 +688,7 @@ function renderMainImage(image) {
   const token = previewToken;
   elements['main-image'].hidden = true;
   updateZoom();
-  elements['main-image'].removeAttribute('src');
+  if (!image) elements['main-image'].removeAttribute('src');
   elements['preview-error'].hidden = true;
   if (!image) return;
 
@@ -639,7 +699,12 @@ function renderMainImage(image) {
       elements['preview-error'].hidden = false;
     }
   };
-  if (image.nativePreview) {
+  const warmed = decodedNeighbors.get(image.url);
+  if (warmed) {
+    elements['main-image'].src = warmed.image.src;
+    elements['main-image'].hidden = false;
+    updateZoom();
+  } else if (image.nativePreview) {
     getPreview(image, 2600).then(url => {
       if (token !== previewToken) return;
       elements['main-image'].src = url;
@@ -984,7 +1049,7 @@ elements['open-folder'].addEventListener('click', openFolder);
 async function rotateSelectedPhoto(change) {
   const image = selectedImage();
   const folder = state.folder;
-  if (!image || !mainImageReady || state.rotating) return;
+  if (!image || !mainImageReady || state.rotating || state.resetting) return;
   rememberCrop();
   state.rotating = true;
   updateZoom();
@@ -1004,6 +1069,32 @@ async function rotateSelectedPhoto(change) {
 elements['rotate-left'].addEventListener('click', () => rotateSelectedPhoto(-90));
 elements['rotate-right'].addEventListener('click', () => rotateSelectedPhoto(90));
 elements['reset-rotation'].addEventListener('click', () => rotateSelectedPhoto('reset'));
+
+elements['reset-editing'].addEventListener('click', async () => {
+  const image = selectedImage();
+  const folder = state.folder;
+  if (!image || state.resetting || state.rotating || state.exporting) return;
+  state.resetting = true;
+  updateZoom();
+  try {
+    await flushCropSave();
+    const result = await api.resetEditing(folder, image.name);
+    if (state.folder !== folder) return;
+    image.crops = result.crops;
+    image.rotation = result.rotation;
+    state.layout = result.layout;
+    state.border = result.border;
+    elements['crop-layout'].value = state.layout;
+    elements['crop-hint'].textContent = 'Originals stay unchanged.';
+    syncBorderControls();
+    resetZoom();
+    render();
+    const button = filmstripButtons.get(image.name);
+    if (button) updateThumbnailCrop(button, image);
+    showToast('Crop, zoom, rotation, and border reset.');
+  } catch (error) { showToast(error.message || 'Could not reset settings', true); }
+  finally { state.resetting = false; updateZoom(); }
+});
 
 function syncBorderControls() {
   elements['border-enabled'].checked = state.border.enabled;
@@ -1032,7 +1123,7 @@ for (const id of ['border-width', 'border-color']) {
 }
 elements['export-image'].addEventListener('click', async () => {
   const image = selectedImage();
-  if (!image || !mainImageReady || state.exporting) return;
+  if (!image || !mainImageReady || state.exporting || state.resetting) return;
   rememberCrop();
   const settings = { folder: state.folder, name: image.name, layout: state.layout,
     crop: isCropping() ? { scale: zoom.scale, x: cropX, y: cropY } : { scale: 1, x: 0, y: 0 }, border: { ...state.border }, rotation: image.rotation || 0 };
@@ -1102,6 +1193,7 @@ document.addEventListener('keydown', event => {
   if (event.target === elements['zoom-map'] && event.key.startsWith('Arrow')) return;
   if (['INPUT', 'TEXTAREA', 'SELECT', 'SUMMARY'].includes(document.activeElement?.tagName)) return;
   if (event.code === 'Space' || event.key === ' ') {
+    if (event.target.closest('button')) return;
     if (isCropping()) { event.preventDefault(); spaceHeld = true; updateZoom(); }
     return;
   }

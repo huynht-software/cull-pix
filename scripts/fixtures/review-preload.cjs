@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('cullPix', {
   getCaptureDates: async () => ({ 'a.png': 200, 'b.png': 100, 'c.png': null }),
   appAction: async () => {},
   setBorder: async () => {},
+  resetEditing: async () => ({ layout: 'original', border: { enabled: false, width: 3, color: '#ffffff' }, crops: {}, rotation: 0 }),
   setRotation: async (_folder, _name, rotation) => ({ rotation, crops: {} }),
   getUpdateState: async () => ({ version: '1.1.0', status: 'unavailable', canInstall: false, message: 'Test session' }),
   onUpdateState: () => {},

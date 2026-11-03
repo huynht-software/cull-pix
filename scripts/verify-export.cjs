@@ -88,6 +88,17 @@ const timeout = setTimeout(() => { console.error('Export verification timed out'
   assert.equal(await read("elements['rotation-angle'].value"), '90°');
   await read("elements['reset-rotation'].click()");
   await waitFor(() => read('!state.rotating && state.images[0].rotation === 0'), 'Rotation reset failed');
+  await read("elements['crop-layout'].value = 'portrait'; elements['crop-layout'].dispatchEvent(new Event('change')); zoom.scale = 1.6; cropX = 0.1; rememberCrop(); elements['reset-editing'].click()");
+  await waitFor(() => read("!state.resetting && state.layout === 'original' && !state.border.enabled"), 'Combined reset did not finish');
+  assert.deepEqual(await read('state.images[0].crops'), {}, 'All crop presets for this photo are cleared');
+  assert.equal(await read('zoom.scale'), 1);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await window.webContents.reload();
+  await waitFor(() => read("mainImageReady && state.layout === 'original' && !state.border.enabled"), 'Combined reset did not survive reload');
+  assert.deepEqual(await read('state.images[0].crops'), {});
+  const saved = JSON.parse(fs.readFileSync(path.join(fixture, 'profile', 'reviews.json'), 'utf8'));
+  assert.equal(saved.exportFolder, fixture, 'Reset preserves the remembered export directory');
+  assert.deepEqual(fs.readFileSync(source), original);
   console.log(`Export integration passed: live border preview, color and width, saved settings, ${metadata.width}×${metadata.height} PNG from the original, cancellation and original-file protection.`);
   clearTimeout(timeout);
   app.exit(0);
