@@ -1199,8 +1199,8 @@ document.addEventListener('keydown', event => {
   }
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
   const key = event.key.toLowerCase();
-  if (key === 'arrowdown' || key === 'j') move(1);
-  else if (key === 'arrowup' || key === 'k') move(-1);
+  if (['arrowright', 'arrowdown', 'k'].includes(key)) move(1);
+  else if (['arrowleft', 'arrowup', 'j'].includes(key)) move(-1);
   else if (key === 'l') toggleKeeper();
   else if (key === 'h') toggleNonKeepers();
   else if (key === 'b') toggleSidebar();

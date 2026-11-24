@@ -29,7 +29,7 @@ Every group on the left (Workspace, View, Crop & Export, Keeper Selection, Quick
 
 1. Choose a folder. Cull Pix shows supported images directly inside that folder, sorted by filename.
 2. Press **L** to keep an unmarked photo and advance, or to unmark an existing keeper: **Enter** confirms, and any other key cancels.
-3. Press **H** to hide or show all unmarked photos. Use **↑ / K** for the previous photo and **↓ / J** for the next photo.
+3. Press **H** to hide or show all unmarked photos. Use **← / ↑ / J** for the previous photo and **→ / ↓ / K** for the next photo.
 4. Click **Copy keepers** or press **C**, then paste the selected files into Finder or File Explorer.
 
 Other shortcuts: **B** to hide or show the sidebar, **F** to hide or show the photo strip on the right, **⌘O / Ctrl+O** to open a folder. Hiding both panels gives the viewer the most space. Navigation stops at the first and last visible photo by default, including after marking a keeper. Enable **Loop navigation** under **View** in the sidebar to wrap around in either direction.

@@ -26,15 +26,23 @@ app.whenReady().then(async () => {
       key('ArrowDown'); key('ArrowDown'); key('ArrowDown'); check(selected() === 'c.png', 'Next stops at last photo');
       check(document.getElementById('next').disabled, 'Next button disabled at end');
       document.getElementById('toggle-loop').click();
-      key('j'); check(selected() === 'a.png', 'Loop allows last to first');
-      key('k'); check(selected() === 'c.png', 'Loop allows first to last');
+      key('k'); check(selected() === 'a.png', 'Loop allows last to first');
+      key('j'); check(selected() === 'c.png', 'Loop allows first to last');
       document.getElementById('toggle-loop').click();
-      key('k'); check(selected() === 'b.png', 'Loop can be turned off');
+      key('j'); check(selected() === 'b.png', 'Loop can be turned off');
       const thumbnail = document.querySelector('.thumb');
       key('ArrowDown'); check(selected() === 'c.png', 'Down moves down');
-      key('k'); check(selected() === 'b.png', 'K moves up');
-      key('j'); check(selected() === 'c.png', 'J moves down');
+      key('j'); check(selected() === 'b.png', 'J moves to previous');
+      key('k'); check(selected() === 'c.png', 'K moves to next');
       key('ArrowUp'); check(selected() === 'b.png', 'Up moves up');
+      for (const next of ['ArrowRight', 'ArrowDown', 'k', 'K']) {
+        key(next); check(selected() === 'c.png', next + ' moves to next');
+        key('ArrowLeft'); check(selected() === 'b.png', 'Left moves to previous');
+      }
+      for (const previous of ['ArrowLeft', 'ArrowUp', 'j', 'J']) {
+        key(previous); check(selected() === 'a.png', previous + ' moves to previous');
+        key('ArrowRight'); check(selected() === 'b.png', 'Right moves to next');
+      }
       check(thumbnail === document.querySelector('.thumb'), 'Navigation preserves thumbnail nodes');
       key('x'); key('2'); await tick();
       check(window.cullPix.testWrites().length === 0, 'Removed rejection keys do nothing');
